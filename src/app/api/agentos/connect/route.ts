@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beginAuthorization } from "@/lib/agentos/binance/oauth";
 import { AgentOSError } from "@/lib/agentos/adapter";
+import { isCrossOriginRequest } from "@/lib/server-mode";
 
 /**
  * Begins the Binance Agent OS OAuth flow (browser authorization).
  * Returns the authorization URL for the browser to follow.
  */
 export async function GET(req: NextRequest) {
+  if (isCrossOriginRequest(req.headers.get("origin"), req.headers.get("host"))) {
+    return NextResponse.json({ ok: false, message: "Cross-origin request rejected." }, { status: 403 });
+  }
+
   const origin = req.nextUrl.origin;
   try {
     const authorizationUrl = await beginAuthorization(origin);
@@ -34,4 +39,8 @@ export async function GET(req: NextRequest) {
       { status: 200 }
     );
   }
+}
+
+export async function POST() {
+  return NextResponse.json({ ok: false, message: "Method not allowed." }, { status: 405 });
 }

@@ -60,9 +60,16 @@ User request ─▶ Intent parser ─▶ Evidence (market + account) ─▶ Deri
 - **Evidence is observable only.** The app displays exactly what the current
   Agent OS permission returns. Anything unavailable is shown as unavailable,
   never estimated.
+- **No LLM in the loop.** Intent parsing, signal derivation, safety checks,
+  and explanations are all deterministic code. Nothing in the product relies
+  on a model that could be prompted, and nothing ever executes without the
+  deterministic safety engine approving it.
 - **Approval is never bypassed.** In Live Mode the execution endpoint
   re-fetches evidence server-side and re-runs the safety engine; the browser
   can never dictate the decision.
+- **Execution needs a server-issued key.** Every proposal carries a signed,
+  one-shot authorization that is bound to the exact order and (in Live Mode)
+  to your session. The execute endpoint verifies it before anything runs.
 - The **audit trail** records every check, approval, and result.
 
 ## Live Agent OS connection
@@ -76,10 +83,16 @@ session per request, no long-lived in-memory state).
   the MCP endpoint. RiskLens tries Dynamic Client Registration for this web
   origin and otherwise reuses credentials from `AGENT_OS_CLIENT_ID`.
 - Tokens live only in **httpOnly cookies** (`rl_agentos_session` and friends)
-  — never in client JS or localStorage.
+  — never in client JS or localStorage. Cookie values are HMAC-signed; set
+  `RL_COOKIE_SECRET` so the key is stable across restarts (a per-process
+  random fallback is used otherwise).
+- **Server-authoritative mode.** The request body may only express intent:
+  "live" without a server-verified Agent OS session is a hard, typed failure,
+  never a silent demo downgrade.
 - **Tool names are never hardcoded.** Tools are discovered at runtime from
   the server's own `tools/list` response and matched to capabilities by
-  keyword heuristics; outputs are normalized by key matching.
+  strict schema heuristics; a create-order tool is only trusted when the
+  granted OAuth scopes corroborate trading access.
 - If authorization is missing or not available for the deployment origin,
   Live Mode reports an honest typed failure and the app stays functional in
   Demo Mode (no fabricated live data).
@@ -115,19 +128,26 @@ npm run build      # production build
 ```
 src/lib/types.ts                       domain types
 src/lib/safety/engine.ts               deterministic PASS/CAUTION/BLOCK engine
+src/lib/safety/engine.test.ts          safety engine tests
 src/lib/demo/data.ts                   deterministic demo scenarios + thresholds
 src/lib/agent/intent.ts                intent parser
+src/lib/agent/intent.test.ts           amount/intent parsing tests
 src/lib/agent/explain.ts               evidence-backed explanations
 src/lib/orchestrator.ts                command + execution guards
+src/lib/orchestrator.test.ts           execution-guard tests
+src/lib/exec-authorization.ts          signed one-shot execution authorizations
+src/lib/exec-authorization.test.ts     authorization lifecycle tests
+src/lib/server-mode.ts                 server-authoritative mode + origin checks
+src/lib/server-mode.test.ts            mode resolution tests
 src/lib/agentos/adapter.ts             capability boundary
 src/lib/agentos/demo-adapter.ts        deterministic demo adapter
-src/lib/agentos/binance/oauth.ts       OAuth (PKCE) flow, httpOnly cookies
+src/lib/agentos/tool-discovery.ts      schema-driven tool discovery + order args
+src/lib/agentos/tool-discovery.test.ts tool discovery tests
+src/lib/agentos/binance/oauth.ts       OAuth (PKCE) flow, signed httpOnly cookies
 src/lib/agentos/binance/mcp-session.ts server-side MCP client session
 src/lib/agentos/binance/index.ts       live Agent OS adapter (tool discovery)
 src/app/api/agent|execute|agentos/…    API routes
 src/components/…                       UI (console, Action Card, evidence, trail)
-src/lib/safety/engine.test.ts          safety engine tests
-src/lib/orchestrator.test.ts           execution-guard tests
 ```
 
 ## Config
@@ -141,8 +161,17 @@ Binance Agent OS MCP endpoint.
   and is built exactly per the Binance Agent OS Developer Guide, but it needs
   a real Binance account (and a reachable `agent.binance.com` origin) to be
   exercised end-to-end. RiskLens never fabricates live success.
+- **Execution authorization is single-instance.** The one-shot, signed
+  execution tokens enforce exact-order replay protection within one server
+  process. On Render the app typically runs on a single web instance, which
+  is fully covered. A multi-instance deployment would need shared storage for
+  the consumed-nonce set; parameter/signature/session binding still holds
+  across instances either way. Set `RL_COOKIE_SECRET` so cookies stay valid
+  across restarts.
 - Live mode configured in the browser is **not persisted** — refresh returns
-  to Demo Mode (OAuth session cookie aside). Scenario selection is persisted.
+  to Demo Mode (OAuth session cookie aside). Scenario selection is persisted,
+  and Live Mode only engages when the server confirms an active Agent OS
+  connection.
 - Only BTCUSDT/ETHUSDT (USDT quote) are supported; amounts are quote-amounts
   (USDT) as specified.
 - The project uses the standard `src/` layout from `create-next-app` rather

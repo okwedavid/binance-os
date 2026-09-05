@@ -95,7 +95,7 @@ export function ConnectionDrawer({
               <ModeCard
                 active={mode === "live"}
                 title="Live"
-                description="Real Agent OS connection."
+                description="Requires a verified Agent OS connection."
                 onClick={() => onModeChange("live")}
               />
             </div>
@@ -155,58 +155,57 @@ export function ConnectionDrawer({
             </Panel>
           </section>
 
-          {mode === "live" && (
-            <section className="space-y-2.5">
-              {liveState?.permissions?.length ? (
-                <div className="space-y-1.5">
-                  {liveState.permissions.map((p) => (
-                    <div
-                      key={p.id}
-                      className="flex items-center justify-between rounded-lg border border-line bg-panel px-3 py-2"
-                    >
-                      <div>
-                        <div className="text-[13px] font-medium text-text">
-                          {p.label}
-                        </div>
-                        <div className="font-mono text-[10px] text-muted">
-                          {p.id}
-                        </div>
+          <section className="space-y-2.5">
+            {liveState?.permissions?.length ? (
+              <div className="space-y-1.5">
+                {liveState.permissions.map((p) => (
+                  <div
+                    key={p.id}
+                    className="flex items-center justify-between rounded-lg border border-line bg-panel px-3 py-2"
+                  >
+                    <div>
+                      <div className="text-[13px] font-medium text-text">
+                        {p.label}
                       </div>
-                      <StatusDot
-                        tone={
-                          p.granted === true
-                            ? "ok"
-                            : p.granted === false
-                              ? "danger"
-                              : "muted"
-                        }
-                      />
+                      <div className="font-mono text-[10px] text-muted">
+                        {p.id}
+                      </div>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <Panel className="px-4 py-3 text-[13px] text-muted">
-                  No scopes confirmed yet. Authorize your Agentic sub-account to
-                  confirm the permission set.
-                </Panel>
-              )}
+                    <StatusDot
+                      tone={
+                        p.granted === true
+                          ? "ok"
+                          : p.granted === false
+                            ? "danger"
+                            : "muted"
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Panel className="px-4 py-3 text-[13px] text-muted">
+                No Agent OS connection yet. Connect the Agentic sub-account to
+                enable live evidence — until then RiskLens stays in Demo Mode
+                and nothing executes.
+              </Panel>
+            )}
 
-              {liveState?.connected ? (
-                <Button variant="secondary" onClick={onDisconnect} className="w-full">
-                  Disconnect Agent OS
-                </Button>
-              ) : (
-                <Button
-                  variant="primary"
-                  onClick={onConnect}
-                  disabled={connecting}
-                  className="w-full"
-                >
-                  {connecting ? "Opening Binance…" : "Connect Agent OS"}
-                </Button>
-              )}
-            </section>
-          )}
+            {liveState?.connected ? (
+              <Button variant="secondary" onClick={onDisconnect} className="w-full">
+                Disconnect Agent OS
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                onClick={onConnect}
+                disabled={connecting}
+                className="w-full"
+              >
+                {connecting ? "Opening Binance…" : "Connect Agent OS"}
+              </Button>
+            )}
+          </section>
 
           <section className="rounded-lg border border-line bg-panel px-4 py-3 text-[12px] leading-relaxed text-muted">
             <span className="font-semibold text-text">Isolation.</span> The

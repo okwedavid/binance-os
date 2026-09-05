@@ -18,6 +18,8 @@ export interface McpTool {
   name: string;
   description: string | null;
   requiredInputs: string[];
+  /** All declared input property names (camelCase preserved), including optional ones. */
+  properties: string[];
 }
 
 interface ToolResultData {
@@ -72,6 +74,11 @@ export class AgentOsMcpSession {
         Array.isArray(tool.inputSchema?.required)
           ? (tool.inputSchema?.required ?? []).filter((r): r is string => typeof r === "string")
           : [],
+      properties: Object.keys(
+        tool.inputSchema?.properties && typeof tool.inputSchema.properties === "object"
+          ? (tool.inputSchema.properties as Record<string, unknown>)
+          : {}
+      ),
     }));
   }
 
@@ -137,6 +144,23 @@ export async function withAgentOsSession<T>(
       await opened.close();
     }
   };
+
+  // Proactively refresh a session whose token is already past expiry
+  // instead of letting it ride until the server rejects it.
+  if (
+    typeof initial.expires_at === "number" &&
+    initial.expires_at <= Date.now() &&
+    initial.refresh_token
+  ) {
+    const refreshed = await refreshStoredSession();
+    if (!refreshed) {
+      throw new AgentOSError(
+        "AUTHORIZATION_REQUIRED",
+        "The Agent OS authorization expired. Connect the Agentic sub-account again."
+      );
+    }
+    return attempt(refreshed);
+  }
 
   try {
     return await attempt(initial);

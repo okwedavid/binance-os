@@ -29,6 +29,12 @@ export interface SafetyEngineInput {
   permissionGranted: boolean | null;
   /** Whether this operation requires a trading permission (execution intent). */
   permissionRequired: boolean;
+  /**
+   * When `true`, a missing account balance is a hard failure instead of a
+   * skipped check. Used for live executions where confirming sufficient
+   * funds is a precondition of safety. Defaults to `false`.
+   */
+  balanceRequired?: boolean;
 }
 
 export function evaluateSafety(input: SafetyEngineInput): SafetyResult {
@@ -91,13 +97,28 @@ export function evaluateSafety(input: SafetyEngineInput): SafetyResult {
   }
 
   // Check 3 — Account balance
-  if (!input.balanceAvailable) {
+  if (input.amount === null) {
     skipped(
       "balance",
       "Account balance",
-      "Balance unavailable from the current Agent OS permission. RiskLens does not claim it is sufficient."
+      "No amount requested; account balance is not required for this operation."
     );
-  } else if (input.amount !== null && input.balanceQuote !== null && input.balanceQuote < input.amount) {
+  } else if (!input.balanceAvailable) {
+    if (input.balanceRequired) {
+      failed(
+        "balance",
+        "Account balance",
+        "No live account balance is available from the current Agent OS permission. RiskLens cannot confirm sufficient funds."
+      );
+      reasons.push("Account balance could not be verified.");
+    } else {
+      skipped(
+        "balance",
+        "Account balance",
+        "Balance unavailable from the current Agent OS permission. RiskLens does not claim it is sufficient."
+      );
+    }
+  } else if (input.balanceQuote !== null && input.balanceQuote < input.amount) {
     failed(
       "balance",
       "Account balance",

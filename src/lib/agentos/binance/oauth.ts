@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ReadonlyRequestCookies } from "next/dist/server/web/spec-extension/adapters/request-cookies";
 import type {
   OAuthClientInformationMixed,
@@ -13,8 +14,15 @@ import { AgentOSError } from "@/lib/agentos/adapter";
  * https://agent.binance.com/mcp/agentic and expects MCP clients to use
  * the standard MCP-over-Streamable-HTTP + OAuth authorization flow
  * (no API keys). This module implements that flow with the official MCP
- * TypeScript SDK on the server side, using httpOnly cookies to carry the
- * per-session OAuth state. The browser never holds access tokens.
+ * TypeScript SDK on the server side, using signed httpOnly cookies to
+ * carry the per-session OAuth state. The browser never holds access
+ * tokens.
+ *
+ * Cookie integrity: every security-sensitive cookie payload is HMAC
+ * signed with `RL_COOKIE_SECRET` (fallback: a per-process random key,
+ * which forces a reconnect after an instance restart and is therefore
+ * safe, not brittle against attackers). Set `RL_COOKIE_SECRET` in
+ * production for a stable key across restarts.
  */
 
 export const AGENT_OS_MCP_URL =
@@ -26,6 +34,7 @@ const CLIENT_COOKIE = "rl_oauth_client";
 const SESSION_COOKIE = "rl_agentos_session";
 
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const FLOW_TTL_SECONDS = 600;
 
 export interface StoredSession {
   access_token: string;
@@ -33,6 +42,47 @@ export interface StoredSession {
   scope?: string;
   expires_at?: number;
   token_type?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Cookie value signing (HMAC-SHA256, no extra dependencies)
+// ---------------------------------------------------------------------------
+
+function cookieKey(): string {
+  const configured = process.env.RL_COOKIE_SECRET;
+  if (configured && configured.length >= 16) return configured;
+  const g = globalThis as Record<string, unknown>;
+  if (!g.__RL_COOKIE_KEY) {
+    g.__RL_COOKIE_KEY = randomBytes(32).toString("hex");
+  }
+  return g.__RL_COOKIE_KEY as string;
+}
+
+function packCookieValue(raw: string): string {
+  const encoded = Buffer.from(raw, "utf8").toString("base64url");
+  const sig = createHmac("sha256", cookieKey()).update(encoded).digest("base64url");
+  return `v1.${encoded}.${sig}`;
+}
+
+function unpackCookieValue(packed: string | undefined): string | null {
+  if (!packed) return null;
+  const parts = packed.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return null;
+  const [, encoded, sig] = parts;
+  const expected = createHmac("sha256", cookieKey()).update(encoded).digest("base64url");
+  if (!safeEqual(expected, sig)) return null;
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
 }
 
 function cookieOptions(maxAge: number) {
@@ -46,7 +96,8 @@ function cookieOptions(maxAge: number) {
 }
 
 function readCookie(store: ReadonlyRequestCookies, name: string): string | undefined {
-  return store.get(name)?.value;
+  const raw = unpackCookieValue(store.get(name)?.value);
+  return raw ?? undefined;
 }
 
 export async function readStoredSession(): Promise<StoredSession | null> {
@@ -63,6 +114,15 @@ export function readStoredSessionFrom(
   try {
     const parsed = JSON.parse(raw) as StoredSession;
     if (!parsed || typeof parsed.access_token !== "string") return null;
+    // An expired session without a refresh token is not valid: requiring a
+    // reconnect is safer than treating an expired session as authorized.
+    if (
+      typeof parsed.expires_at === "number" &&
+      parsed.expires_at <= Date.now() &&
+      typeof parsed.refresh_token !== "string"
+    ) {
+      return null;
+    }
     return parsed;
   } catch {
     return null;
@@ -73,7 +133,7 @@ export async function saveSession(session: StoredSession): Promise<void> {
   const { cookies } = await import("next/headers");
   (await cookies()).set(
     SESSION_COOKIE,
-    JSON.stringify(session),
+    packCookieValue(JSON.stringify(session)),
     cookieOptions(Math.floor(TOKEN_TTL_MS / 1000))
   );
 }
@@ -87,6 +147,14 @@ export async function clearSession(): Promise<void> {
   store.set(VERIFIER_COOKIE, "", { ...cookieOptions(0), maxAge: 0 });
 }
 
+export async function sessionFingerprint(): Promise<string> {
+  const { cookies } = await import("next/headers");
+  const store = await cookies();
+  const raw = unpackCookieValue(store.get(SESSION_COOKIE)?.value);
+  if (!raw) return "";
+  return createHmac("sha256", cookieKey()).update(raw).digest("hex");
+}
+
 async function readClientInfo(): Promise<OAuthClientInformationMixed | null> {
   const { cookies } = await import("next/headers");
   const store = await cookies();
@@ -97,6 +165,15 @@ async function readClientInfo(): Promise<OAuthClientInformationMixed | null> {
   } catch {
     return null;
   }
+}
+
+async function persistClientInfo(clientInformation: OAuthClientInformationMixed): Promise<void> {
+  const { cookies } = await import("next/headers");
+  (await cookies()).set(
+    CLIENT_COOKIE,
+    packCookieValue(JSON.stringify(clientInformation)),
+    cookieOptions(Math.floor(TOKEN_TTL_MS / 1000))
+  );
 }
 
 function makeFetch(): typeof fetch {
@@ -139,6 +216,7 @@ export async function beginAuthorization(origin: string): Promise<URL> {
 
   const configuredClientId = process.env.AGENT_OS_CLIENT_ID;
   if (configuredClientId) {
+    // Pre-registered client: build from configuration.
     clientInformation = {
       client_id: configuredClientId,
       ...(process.env.AGENT_OS_CLIENT_SECRET
@@ -168,14 +246,13 @@ export async function beginAuthorization(origin: string): Promise<URL> {
       clientMetadata,
       fetchFn,
     });
-    // Persist client registration so token refresh works without re-registering.
-    const { cookies } = await import("next/headers");
-    (await cookies()).set(
-      CLIENT_COOKIE,
-      JSON.stringify(clientInformation),
-      cookieOptions(Math.floor(TOKEN_TTL_MS / 1000))
-    );
   }
+
+  // Persist the client information BEFORE starting authorization so the
+  // callback (and later token refreshes) can retrieve the exact same
+  // client regardless of whether it came from DCR or from the
+  // pre-registered AGENT_OS_CLIENT_ID configuration.
+  await persistClientInfo(clientInformation);
 
   const state = randomToken();
   const { authorizationUrl, codeVerifier } = await startAuthorization(
@@ -191,8 +268,8 @@ export async function beginAuthorization(origin: string): Promise<URL> {
 
   const { cookies } = await import("next/headers");
   const store = await cookies();
-  store.set(STATE_COOKIE, state, cookieOptions(600));
-  store.set(VERIFIER_COOKIE, codeVerifier, cookieOptions(600));
+  store.set(STATE_COOKIE, packCookieValue(state), cookieOptions(FLOW_TTL_SECONDS));
+  store.set(VERIFIER_COOKIE, packCookieValue(codeVerifier), cookieOptions(FLOW_TTL_SECONDS));
 
   return authorizationUrl;
 }
@@ -213,43 +290,50 @@ export async function completeAuthorization(
   const { cookies } = await import("next/headers");
   const store = await cookies();
 
-  if (!code || !state) {
-    throw new AgentOSError("AUTHORIZATION_REQUIRED", "Agent OS authorization was not completed.");
-  }
+  const clearFlowCookies = () => {
+    store.set(STATE_COOKIE, "", { ...cookieOptions(0), maxAge: 0 });
+    store.set(VERIFIER_COOKIE, "", { ...cookieOptions(0), maxAge: 0 });
+  };
 
-  const expectedState = readCookie(store, STATE_COOKIE);
-  if (!expectedState || expectedState !== state) {
-    throw new AgentOSError("AUTHORIZATION_REQUIRED", "Agent OS authorization state did not match. Try connecting again.");
-  }
-
-  const verifier = readCookie(store, VERIFIER_COOKIE);
-  const clientInformation = JSON.parse(readCookie(store, CLIENT_COOKIE) ?? "null") as OAuthClientInformationMixed | null;
-  if (!verifier || !clientInformation) {
-    throw new AgentOSError("AUTHORIZATION_REQUIRED", "The Agent OS authorization flow expired. Try connecting again.");
-  }
-
-  const callbackUrl = new URL("/api/agentos/callback", origin).toString();
-  const fetchFn = makeFetch();
-  const serverInfo = await discoverOAuthServerInfo(AGENT_OS_MCP_URL, { fetchFn });
-
-  const tokens = await exchangeAuthorization(
-    new URL(serverInfo.authorizationServerUrl),
-    {
-      metadata: serverInfo.authorizationServerMetadata,
-      clientInformation,
-      authorizationCode: code,
-      codeVerifier: verifier,
-      redirectUri: callbackUrl,
-      resource: new URL(AGENT_OS_MCP_URL),
-      fetchFn,
+  try {
+    if (!code || !state) {
+      throw new AgentOSError("AUTHORIZATION_REQUIRED", "Agent OS authorization was not completed.");
     }
-  );
 
-  store.set(STATE_COOKIE, "", { ...cookieOptions(0), maxAge: 0 });
-  store.set(VERIFIER_COOKIE, "", { ...cookieOptions(0), maxAge: 0 });
+    const expectedState = readCookie(store, STATE_COOKIE);
+    if (!expectedState || expectedState !== state) {
+      throw new AgentOSError("AUTHORIZATION_REQUIRED", "Agent OS authorization state did not match. Try connecting again.");
+    }
 
-  await saveSession(sessionFromTokens(tokens));
-  return { scope: tokens.scope };
+    const verifier = readCookie(store, VERIFIER_COOKIE);
+    const clientInformation = JSON.parse(readCookie(store, CLIENT_COOKIE) ?? "null") as OAuthClientInformationMixed | null;
+    if (!verifier || !clientInformation) {
+      throw new AgentOSError("AUTHORIZATION_REQUIRED", "The Agent OS authorization flow expired. Try connecting again.");
+    }
+
+    const callbackUrl = new URL("/api/agentos/callback", origin).toString();
+    const fetchFn = makeFetch();
+    const serverInfo = await discoverOAuthServerInfo(AGENT_OS_MCP_URL, { fetchFn });
+
+    const tokens = await exchangeAuthorization(
+      new URL(serverInfo.authorizationServerUrl),
+      {
+        metadata: serverInfo.authorizationServerMetadata,
+        clientInformation,
+        authorizationCode: code,
+        codeVerifier: verifier,
+        redirectUri: callbackUrl,
+        resource: new URL(AGENT_OS_MCP_URL),
+        fetchFn,
+      }
+    );
+
+    clearFlowCookies();
+    await saveSession(sessionFromTokens(tokens));
+    return { scope: tokens.scope };
+  } finally {
+    clearFlowCookies();
+  }
 }
 
 export async function refreshStoredSession(): Promise<StoredSession | null> {

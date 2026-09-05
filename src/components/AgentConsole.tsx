@@ -52,6 +52,10 @@ export function AgentConsole() {
   const [evidence, setEvidence] = useState<EvidenceBundle | null>(null);
   const [busy, setBusy] = useState(false);
   const [executing, setExecuting] = useState(false);
+  // One-shot double-submit guard (A2): the ref is synchronous and cannot
+  // be raced by React's batched state updates.
+  const executingRef = useRef(false);
+  const [execAuth, setExecAuth] = useState<{ token: string; expiresAtMs: number } | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -139,6 +143,7 @@ export function AgentConsole() {
       const data = (await res.json()) as AgentResponse & {
         ok: boolean;
         timeline?: TimelineEvent[];
+        executionAuthorization?: { token: string; expiresAtMs: number };
       };
       appendEvents(data.timeline);
       if (!data.ok) {
@@ -167,6 +172,7 @@ export function AgentConsole() {
       if (data.proposal) {
         setProposal(data.proposal);
         setEvidence(data.evidence ?? null);
+        setExecAuth(data.executionAuthorization ?? null);
       } else {
         setEvidence(data.evidence ?? null);
       }
@@ -186,7 +192,20 @@ export function AgentConsole() {
   }
 
   async function approve() {
-    if (!proposal || executing) return;
+    if (!proposal || executingRef.current) return;
+    if (!execAuth) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "agent",
+          id: uid(),
+          text: "This proposal is missing a valid execution authorization. Ask RiskLens to prepare the order again.",
+          tone: "error",
+        },
+      ]);
+      return;
+    }
+    executingRef.current = true;
     setExecuting(true);
     try {
       const res = await fetch("/api/agent/execute", {
@@ -201,12 +220,14 @@ export function AgentConsole() {
           quote: proposal.quote,
           requestText: proposal.requestText,
           approve: true,
+          executionAuthorization: execAuth.token,
         }),
       });
       const data = await res.json();
       appendEvents(data.timeline);
       if (data.ok && data.proposal) {
         setProposal(data.proposal);
+        setExecAuth(null);
         setMessages((prev) => [
           ...prev,
           { role: "agent", id: uid(), text: data.message, tone: "default" },
@@ -240,6 +261,7 @@ export function AgentConsole() {
         },
       ]);
     } finally {
+      executingRef.current = false;
       setExecuting(false);
     }
   }
@@ -247,6 +269,7 @@ export function AgentConsole() {
   function cancel() {
     setProposal(null);
     setEvidence(null);
+    setExecAuth(null);
     appendEvents([
       {
         id: uid(),
@@ -343,7 +366,15 @@ export function AgentConsole() {
               {mode === "demo" ? "DEMO" : "LIVE"}
             </span>
             <button
-              onClick={() => setDrawerOpen(true)}
+              onClick={() => {
+                setDrawerOpen(true);
+                void refreshStatus().then((states) => {
+                  if (states) {
+                    setDemoState(states.demo);
+                    setLiveState(states.live);
+                  }
+                });
+              }}
               className="inline-flex items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-line2 hover:text-text"
             >
               <StatusDot
@@ -488,9 +519,30 @@ export function AgentConsole() {
         onClose={() => setDrawerOpen(false)}
         mode={mode}
         onModeChange={(m) => {
+          if (m === "live") {
+            // C9: only enter Live mode when the server confirms a real
+            // Agent OS connection. Never blind-switch into a dead mode.
+            setNotice(null);
+            void refreshStatus().then((states) => {
+              if (states && states.live.connected) {
+                setMode("live");
+                setProposal(null);
+                setEvidence(null);
+                setExecAuth(null);
+                setDemoState(states.demo);
+                setLiveState(states.live);
+              } else {
+                setNotice(
+                  "Live mode requires a verified Agent OS connection first. Connect from this panel."
+                );
+              }
+            });
+            return;
+          }
           setMode(m);
           setProposal(null);
           setEvidence(null);
+          setExecAuth(null);
           void refreshStatus().then((states) => {
             if (states) {
               setDemoState(states.demo);

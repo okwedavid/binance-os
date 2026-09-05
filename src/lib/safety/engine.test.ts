@@ -107,4 +107,37 @@ describe("evaluateSafety", () => {
     });
     expect(result.status).toBe("BLOCK");
   });
+
+  it("BLOCKs when balance is REQUIRED but unavailable (live gate)", () => {
+    const result = evaluateSafety({
+      ...base,
+      balanceAvailable: false,
+      balanceQuote: null,
+      balanceRequired: true,
+    });
+    expect(result.status).toBe("BLOCK");
+    expect(result.checks.find((c) => c.id === "balance")?.status).toBe("fail");
+  });
+
+  it("skips (does not fail) the balance check when balance is unavailable and not required", () => {
+    const result = evaluateSafety({
+      ...base,
+      balanceAvailable: false,
+      balanceQuote: null,
+    });
+    expect(result.checks.find((c) => c.id === "balance")?.status).toBe("skip");
+    expect(result.status).toBe("PASS");
+  });
+
+  it("does not require balance for analysis when no amount is present, even with balanceRequired set", () => {
+    const result = evaluateSafety({
+      ...base,
+      amount: null,
+      balanceAvailable: false,
+      balanceQuote: null,
+      balanceRequired: true,
+    });
+    expect(result.checks.find((c) => c.id === "balance")?.status).toBe("skip");
+    expect(result.status).toBe("PASS");
+  });
 });

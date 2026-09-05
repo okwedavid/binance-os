@@ -27,7 +27,7 @@ export interface AgentOSAdapter {
   readonly kind: "demo" | "live";
   connectionState(): Promise<ConnectionState>;
   marketEvidence(symbol: string): Promise<MarketEvidence>;
-  accountEvidence(op: "analyze" | "propose", symbol: string, side: Side | null): Promise<AccountEvidence>;
+  accountEvidence(op: "analyze" | "propose"): Promise<AccountEvidence>;
   executeOrder(request: OrderRequest): Promise<ExecutionResult>;
 }
 

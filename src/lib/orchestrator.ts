@@ -14,7 +14,7 @@ import { parseIntent, requiredForOp, clarifyQuestion, supportNotes } from "@/lib
 import { evaluateSafety, formatAmount } from "@/lib/safety/engine";
 import { explainDecision, decisionSummary } from "@/lib/agent/explain";
 import { getAdapter } from "@/lib/agentos";
-import { userMessageForError } from "@/lib/agentos/adapter";
+import { userMessageForError, type AgentOSAdapter } from "@/lib/agentos/adapter";
 import { deriveSignalsFromMarket } from "@/lib/demo/data";
 import type { DemoScenario } from "@/lib/demo/data";
 import { normalizeSymbol } from "@/lib/demo/data";
@@ -38,6 +38,16 @@ export interface ExecuteContext {
   approve: boolean;
 }
 
+/**
+ * Dependency seam for handleExecute. Real callers pass nothing; tests
+ * inject a fake adapter / a hook that runs after a successful order
+ * submission so the "success + late failure" path can be verified.
+ */
+export interface ExecuteDeps {
+  adapter?: AgentOSAdapter | null;
+  afterExecutionStep?: (result: ExecutionResult) => Promise<void> | void;
+}
+
 export type ExecuteOutcome =
   | { ok: true; result: ExecutionResult; proposal: Proposal; safety: SafetyResult; timeline: TimelineEvent[] }
   | { ok: false; blocked: boolean; safety: SafetyResult | null; message: string; detail?: string; timeline: TimelineEvent[] };
@@ -51,11 +61,11 @@ async function buildEvidence(
   scenario: DemoScenario,
   symbol: string,
   op: "analyze" | "propose",
-  side: "buy" | "sell" | null
+  adapter?: AgentOSAdapter
 ): Promise<EvidenceBundle> {
-  const adapter = getAdapter(mode, scenario);
-  const market = await adapter.marketEvidence(symbol);
-  const account = await adapter.accountEvidence(op, symbol, side);
+  const effectiveAdapter = adapter ?? getAdapter(mode, scenario);
+  const market = await effectiveAdapter.marketEvidence(symbol);
+  const account = await effectiveAdapter.accountEvidence(op);
 
   const derived: DerivedSignals =
     market.lastPrice !== null &&
@@ -84,21 +94,23 @@ async function buildEvidence(
 function safetyFor(
   intent: Intent,
   evidence: EvidenceBundle,
-  op: "analyze" | "propose"
+  op: "analyze" | "propose",
+  mode: Mode
 ): SafetyResult {
+  const propose = op === "propose";
   return evaluateSafety({
-    amount: op === "propose" ? intent.amount : null,
+    amount: propose ? intent.amount : null,
     marketDataAgeSeconds: evidence.market.ageSeconds,
     freshnessTargetSeconds: FRESHNESS_TARGET_SECONDS,
     volatility: evidence.derived.volatility,
     liquidity: evidence.derived.liquidity,
     balanceAvailable: evidence.account.available,
     balanceQuote: evidence.account.quoteBalance,
-    permissionGranted:
-      op === "propose"
-        ? (evidence.account.permission?.granted ?? null)
-        : null,
-    permissionRequired: op === "propose",
+    permissionGranted: propose ? (evidence.account.permission?.granted ?? null) : null,
+    permissionRequired: propose,
+    // A live execution must have real funds confirmed; a demo proposal is
+    // a deterministic simulation and does not need it.
+    balanceRequired: propose && mode === "live",
   });
 }
 
@@ -134,8 +146,8 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
     }
 
     if (intent.op === "analyze" && intent.symbol) {
-      const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "analyze", null);
-      const safety = safetyFor(intent, evidence, "analyze");
+      const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "analyze");
+      const safety = safetyFor(intent, evidence, "analyze", ctx.mode);
       const message = explainDecision(intent, evidence.market, evidence.account, evidence.derived, safety);
       return {
         ok: true,
@@ -153,8 +165,8 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
     }
 
     if (intent.op === "propose" && intent.symbol && intent.amount !== null && intent.side) {
-      const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "propose", intent.side);
-      const safety = safetyFor(intent, evidence, "propose");
+      const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "propose");
+      const safety = safetyFor(intent, evidence, "propose", ctx.mode);
       const proposal = buildProposal(ctx.mode, intent, evidence, safety);
       const quote = evidence.market.lastPrice;
       const message =
@@ -180,7 +192,7 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
 
     if (intent.op === "balance") {
       const adapter = getAdapter(ctx.mode, ctx.scenario);
-      const account = await adapter.accountEvidence("analyze", "BTCUSDT", null);
+      const account = await adapter.accountEvidence("analyze");
       const balanceText =
         account.available && account.quoteBalance !== null
           ? `Available balance: ${formatAmount(account.quoteBalance)} USDT.`
@@ -210,7 +222,10 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
   }
 }
 
-export async function handleExecute(ctx: ExecuteContext): Promise<ExecuteOutcome> {
+export async function handleExecute(
+  ctx: ExecuteContext,
+  deps: ExecuteDeps = {}
+): Promise<ExecuteOutcome> {
   if (!ctx.approve) {
     return {
       ok: false,
@@ -245,7 +260,7 @@ export async function handleExecute(ctx: ExecuteContext): Promise<ExecuteOutcome
   try {
     // Re-verify on the server with FRESH evidence. The client may never
     // dictate the safety decision or the execution path.
-    const evidence = await buildEvidence(ctx.mode, ctx.scenario, symbol, "propose", ctx.side);
+    const evidence = await buildEvidence(ctx.mode, ctx.scenario, symbol, "propose", deps.adapter ?? undefined);
     const intent: Intent = {
       raw: ctx.requestText,
       op: "propose",
@@ -254,7 +269,7 @@ export async function handleExecute(ctx: ExecuteContext): Promise<ExecuteOutcome
       amount: ctx.amount,
       quote: ctx.quote,
     };
-    const safety = safetyFor(intent, evidence, "propose");
+    const safety = safetyFor(intent, evidence, "propose", ctx.mode);
 
     if (safety.status === "BLOCK") {
       const why = explainDecision(intent, evidence.market, evidence.account, evidence.derived, safety);
@@ -267,28 +282,84 @@ export async function handleExecute(ctx: ExecuteContext): Promise<ExecuteOutcome
       };
     }
 
-    const adapter = getAdapter(ctx.mode, ctx.scenario);
-    const result = await adapter.executeOrder({
-      symbol,
-      side: ctx.side,
-      amountQuote: ctx.amount,
-      quote: ctx.quote,
-    });
+    const adapter = deps.adapter ?? getAdapter(ctx.mode, ctx.scenario);
 
-    const proposal = buildProposal(ctx.mode, intent, evidence, safety, result);
+    let result: ExecutionResult;
+    try {
+      result = await adapter.executeOrder({
+        symbol,
+        side: ctx.side,
+        amountQuote: ctx.amount,
+        quote: ctx.quote,
+      });
+    } catch (err) {
+      const { message, detail } = userMessageForError(err);
+      return {
+        ok: false,
+        blocked: false,
+        safety,
+        message,
+        detail,
+        timeline: [event("PAUSED", "Action paused", "RiskLens did not execute anything.")],
+      };
+    }
+
+    // Post-processing (proposal building, hooks) must NEVER change the
+    // fact that an order was already submitted. If it fails, the outcome
+    // still reports the submission honestly, flagged as unconfirmed.
+    let proposal: Proposal;
+    try {
+      proposal = buildProposal(ctx.mode, intent, evidence, safety, result);
+    } catch {
+      proposal = {
+        id: crypto.randomUUID(),
+        mode: ctx.mode,
+        op: "propose",
+        side: ctx.side,
+        symbol,
+        amount: ctx.amount,
+        quote: ctx.quote,
+        requestText: ctx.requestText,
+        evidence,
+        safety,
+        phase: result.simulated ? "SIMULATED" : "EXECUTED",
+        createdAtMs: Date.now(),
+      };
+    }
+
+    let postError: unknown = null;
+    if (deps.afterExecutionStep) {
+      try {
+        await deps.afterExecutionStep(result);
+      } catch (err) {
+        postError = err;
+      }
+    }
+
     const kind: TimelineKind = result.simulated ? "SIMULATED" : "EXECUTED";
     const label = result.simulated
       ? "Simulated execution"
       : "Order submitted through Agent OS";
+    const timeline: TimelineEvent[] = [
+      event("APPROVED", "User approved action", `Approved ${ctx.side.toUpperCase()} ${formatAmount(ctx.amount)} ${symbol}.`),
+      event(kind, label, result.message),
+    ];
+    if (postError !== null) {
+      timeline.push(
+        event(
+          "SYSTEM",
+          "Confirmation pending",
+          "The order was submitted, but the final confirmation could not be recorded."
+        )
+      );
+    }
+
     return {
       ok: true,
       result,
       proposal,
       safety,
-      timeline: [
-        event("APPROVED", "User approved action", `Approved ${ctx.side.toUpperCase()} ${formatAmount(ctx.amount)} ${symbol}.`),
-        event(kind, label, result.message),
-      ],
+      timeline,
     };
   } catch (err) {
     const { message, detail } = userMessageForError(err);

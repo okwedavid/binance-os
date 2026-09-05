@@ -13,7 +13,7 @@ import {
  */
 
 const AMOUNT_RE =
-  /\$\s?(\d+(?:[.,]\d+)?)|\b(\d+(?:[.,]\d+)?)\s*(usdt|usd)\b/i;
+  /\$\s?(\d[\d.,]{0,14})|\b(\d[\d.,]{0,14})\s*(usdt|usd)\b/i;
 
 const BUY_RE = /\b(buy|purchase|go long|accumulate|dca into)\b/i;
 const SELL_RE = /\b(sell|exit|reduce)\b/i;
@@ -92,12 +92,71 @@ function extractSymbol(input: string): string | null {
   return null;
 }
 
-function extractAmount(input: string): number | null {
+export function extractAmount(input: string): number | null {
   const match = input.match(AMOUNT_RE);
   if (!match) return null;
   const value = match[1] ?? match[2];
   if (!value) return null;
-  const parsed = Number(value.replace(",", "."));
+  return parseAmountString(value);
+}
+
+/**
+ * Robust amount parsing for human-entered amounts.
+ *
+ * - "20"            -> 20
+ * - "1,000"         -> 1000   (single comma grouping, no decimal point)
+ * - "2,500"         -> 2500
+ * - "10,000.50"     -> 10000.5
+ * - "12,5" or "12.5"-> 12.5
+ * - "1.000"         -> null   (ambiguous grouping — reject rather than guess)
+ *
+ * Returns null whenever the value cannot be resolved unambiguously so the
+ * caller can ask the user instead of executing on a guessed number.
+ */
+export function parseAmountString(value: string): number | null {
+  const cleaned = value.trim().replace(/^[$€£¥]\s?/, "");
+  if (!/^\d[\d.,]*$/.test(cleaned)) return null;
+
+  const hasDot = cleaned.includes(".");
+  const hasComma = cleaned.includes(",");
+  const lastDot = cleaned.lastIndexOf(".");
+  const lastComma = cleaned.lastIndexOf(",");
+
+  if (hasDot && hasComma) {
+    // Last separator wins as the decimal point; the other is grouping.
+    const decimalIsDot = lastDot > lastComma;
+    const normalized = decimalIsDot
+      ? cleaned.replace(/,/g, "")
+      : cleaned.replace(/\./g, "").replace(",", ".");
+    return toPositiveNumber(normalized);
+  }
+
+  if (hasComma) {
+    const digitsAfter = cleaned.length - lastComma - 1;
+    if (digitsAfter === 1 || digitsAfter === 2) {
+      return toPositiveNumber(cleaned.replace(",", "."));
+    }
+    if (digitsAfter === 3) {
+      // Grouping, e.g. "1,000" -> 1000.
+      return toPositiveNumber(cleaned.replace(/,/g, ""));
+    }
+    return null;
+  }
+
+  if (hasDot) {
+    const digitsAfter = cleaned.length - lastDot - 1;
+    if (digitsAfter === 1 || digitsAfter === 2 || digitsAfter === 0) {
+      return toPositiveNumber(cleaned);
+    }
+    // "1.000" is ambiguous between 1.0 and 1000 — reject.
+    return null;
+  }
+
+  return toPositiveNumber(cleaned);
+}
+
+function toPositiveNumber(text: string): number | null {
+  const parsed = Number(text);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
 }

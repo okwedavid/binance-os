@@ -1,14 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCommand } from "@/lib/orchestrator";
-import type { DemoScenario } from "@/lib/demo/data";
-import type { Mode } from "@/lib/types";
+import { readStoredSession, sessionFingerprint } from "@/lib/agentos/binance/oauth";
+import { resolveServerMode, parseRequestedScenario, isCrossOriginRequest } from "@/lib/server-mode";
+import { issueExecutionAuthorization } from "@/lib/exec-authorization";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_COMMAND_LENGTH = 400;
 
+/**
+ * Command endpoint (proposals are created here).
+ *
+ * The request body "mode" is treated as intent only. The server resolves
+ * the authoritative mode: "live" without a valid Agent OS session is a
+ * hard failure — never a silent demo fallback and never a fabricated live
+ * run. Every proposal that leaves this route carries a signed, one-shot
+ * execution authorization that the execute endpoint verifies.
+ */
 export async function POST(req: NextRequest) {
+  if (isCrossOriginRequest(req.headers.get("origin"), req.headers.get("host"))) {
+    return NextResponse.json(
+      { ok: false, message: "Cross-origin request rejected.", timeline: [] },
+      { status: 403 }
+    );
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -19,27 +36,59 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const mode = parseMode(body);
-  const scenario = parseScenario(body);
+  const requestedMode =
+    body && typeof body === "object" && (body as { mode: unknown }).mode === "live"
+      ? "live"
+      : "demo";
+  const scenario = parseRequestedScenario(
+    body && typeof body === "object" ? (body as { scenario: unknown }).scenario : undefined
+  );
   const command = parseCommand(body);
+  if (!command) {
+    return NextResponse.json(
+      { ok: false, message: "RiskLens could not read the request.", timeline: [] },
+      { status: 200 }
+    );
+  }
+
+  const hasSession = (await readStoredSession()) !== null;
+  const resolved = resolveServerMode(requestedMode, hasSession);
+  if (resolved.kind === "error") {
+    return NextResponse.json(
+      {
+        ok: false,
+        message: resolved.message,
+        detail: resolved.detail,
+        timeline: [{ id: "system", kind: "CANCELLED", label: "Live mode unavailable", detail: resolved.detail, atMs: Date.now() }],
+      },
+      { status: 200 }
+    );
+  }
+  const mode = resolved.mode;
 
   const response = await handleCommand({ mode, scenario, command });
-  return NextResponse.json(response, { status: 200 });
+
+  let executionAuthorization: { token: string; expiresAtMs: number } | undefined;
+  if (response.ok && response.kind === "response" && response.proposal) {
+    const bind = mode === "live" ? await sessionFingerprint() : "";
+    const order = {
+      mode,
+      symbol: response.proposal.symbol,
+      side: response.proposal.side,
+      amount: response.proposal.amount,
+      requestText: response.proposal.requestText,
+    };
+    executionAuthorization = issueExecutionAuthorization({ order, bind });
+  }
+
+  return NextResponse.json(
+    { ...response, ...(executionAuthorization ? { executionAuthorization } : {}) },
+    { status: 200 }
+  );
 }
 
-function parseMode(body: unknown): Mode {
-  if (body && typeof body === "object" && "mode" in body && (body as { mode: unknown }).mode === "live") {
-    return "live";
-  }
-  return "demo";
-}
-
-function parseScenario(body: unknown): DemoScenario {
-  if (body && typeof body === "object" && "scenario" in body) {
-    const s = (body as { scenario: unknown }).scenario;
-    if (s === "volatile" || s === "blocked") return s;
-  }
-  return "healthy";
+export async function GET() {
+  return NextResponse.json({ ok: false, message: "Method not allowed." }, { status: 405 });
 }
 
 function parseCommand(body: unknown): string {

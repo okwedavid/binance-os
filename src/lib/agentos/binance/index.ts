@@ -13,6 +13,11 @@ import {
   scopeList,
   type StoredSession,
 } from "@/lib/agentos/binance/oauth";
+import {
+  buildOrderArgs,
+  computeObservationAgeSeconds,
+  selectTool,
+} from "@/lib/agentos/tool-discovery";
 
 /**
  * BinanceAgentOSAdapter talks to the real Binance Agent OS MCP server
@@ -20,9 +25,11 @@ import {
  *
  * Tool names are never assumed: they are discovered at runtime from the
  * server's own `tools/list` response and matched to internal capabilities
- * by keyword heuristics. Tool outputs are normalized by key matching.
- * Anything the server does not provide is reported as unavailable —
- * never estimated.
+ * by strict schema-driven heuristics. Tool outputs are normalized by key
+ * matching. Anything the server does not provide is reported as
+ * unavailable — never estimated. Unknown observation timestamps are never
+ * labeled fresh; freshness that cannot be verified stays "unknown" and
+ * the safety engine treats it as a BLOCK for execution.
  */
 export class BinanceAgentOSAdapter implements AgentOSAdapter {
   readonly kind = "live" as const;
@@ -104,6 +111,10 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
   }
 
   async accountEvidence(op: "analyze" | "propose"): Promise<AccountEvidence> {
+    const stored = await readStoredSession();
+    const scopes = scopeList(stored);
+    this.cachedScopes = scopes;
+
     return withAgentOsSession(async (session) => {
       const tools = await session.listTools();
       this.cacheTools(tools);
@@ -124,19 +135,7 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
         }
       }
 
-      const orderPermission: PermissionInfo = orderTool
-        ? {
-            id: "spot-trade",
-            label: "Spot trading",
-            granted: true,
-            scopeSource: `tool:${orderTool.name}`,
-          }
-        : {
-            id: "spot-trade",
-            label: "Spot trading",
-            granted: false,
-            scopeSource: "tool-discovery",
-          };
+      const orderPermission = tradingPermission(scopes, orderTool);
 
       const permission = op === "propose" ? orderPermission : null;
 
@@ -153,6 +152,10 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
   }
 
   async executeOrder(request: OrderRequest): Promise<ExecutionResult> {
+    const stored = await readStoredSession();
+    const scopes = scopeList(stored);
+    this.cachedScopes = scopes;
+
     return withAgentOsSession(async (session) => {
       const tools = await session.listTools();
       this.cacheTools(tools);
@@ -162,6 +165,14 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
         throw new AgentOSError(
           "CAPABILITY_UNAVAILABLE",
           "The Agent OS connection does not grant a trading tool. The action is blocked."
+        );
+      }
+
+      const orderPermission = tradingPermission(scopes, orderTool);
+      if (orderPermission.granted !== true) {
+        throw new AgentOSError(
+          "CAPABILITY_UNAVAILABLE",
+          "Trading permission could not be confirmed for this Agent OS session. RiskLens will not execute."
         );
       }
 
@@ -187,6 +198,7 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
 
   /** The tool set observed in this server request (used for permissions). */
   private cachedTools: McpTool[] = [];
+  private cachedScopes: string[] = [];
   private cacheTools(tools: McpTool[]): McpTool[] {
     this.cachedTools = tools;
     return tools;
@@ -227,12 +239,13 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
     ]);
     const high24h = pickNumber(priceObject, ["highprice", "highprice24h", "high", "24high"]);
     const low24h = pickNumber(priceObject, ["lowprice", "lowprice24h", "low", "24low"]);
+    // Quote-volume candidates only: base-asset volume ("volume") is NEVER
+    // labeled as quote liquidity.
     const quoteVolume24h = pickNumber(priceObject, [
       "quotevolume",
       "quotevolume24h",
       "quotevolume24",
       "volumeinquote",
-      "volume",
     ]);
     if (quoteVolume24h === null) unavailable.push("24h quote volume");
 
@@ -260,13 +273,18 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
         ? ((askPrice - bidPrice) / mid) * 100
         : null;
 
-    let ageSeconds: number | null = null;
-    const serverTs = pickNumber(priceObject, ["eventtime", "timestamp", "opentime", "transactiontime"]);
-    if (serverTs !== null) {
-      ageSeconds = Math.max(0, (capturedAtMs - serverTs) / 1000);
-    } else {
-      ageSeconds = 0;
-    }
+    // Observation-time candidates only. "opentime"/"openTime" (the 24h
+    // window open) is deliberately NOT a candidate. When no trustworthy
+    // timestamp is available, age stays null (BLOCK for freshness).
+    const observedTs = pickNumber(priceObject, [
+      "eventtime",
+      "e",
+      "transactiontime",
+      "close_time",
+      "closetime",
+      "c",
+    ]);
+    const ageSeconds = computeObservationAgeSeconds(capturedAtMs, observedTs);
 
     if (quoteVolume24h === null) {
       unavailable.push("Liquidity could not be derived. Only the raw observed values are shown.");
@@ -295,35 +313,38 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
     tools: McpTool[],
     scopes: string[]
   ): ConnectionState {
+    this.cachedScopes = scopes;
+
     const market = selectTool("market", tools) !== null;
     const account = selectTool("balance", tools) !== null;
-    const trading = selectTool("order", tools) !== null;
+    const orderTool = selectTool("order", tools);
+    const trading = tradingPermission(scopes, orderTool);
 
     const permissions: PermissionInfo[] = [
       {
         id: "market-data",
         label: "Market data",
         granted: market,
-        scopeSource: market ? "tool-discovery" : "no-tool-exposed",
+        scopeSource: market ? "agentos-tools/list" : "no-tool-exposed",
       },
       {
         id: "account-read",
         label: "Account read",
         granted: account,
-        scopeSource: account ? "tool-discovery" : "no-tool-exposed",
+        scopeSource: account ? "agentos-tools/list" : "no-tool-exposed",
       },
       {
         id: "spot-trade",
         label: "Spot trading",
-        granted: trading,
-        scopeSource: trading ? "tool-discovery" : "no-tool-exposed",
+        granted: trading.granted,
+        scopeSource: trading.scopeSource,
       },
     ];
 
     const scopeNote =
       scopes.length > 0
         ? `Granted OAuth scopes: ${scopes.join(", ")}.`
-        : "No explicit scope string was returned by the authorization server.";
+        : "No explicit scope string was returned by the authorization server; permissions are read from the Agent OS tool set.";
 
     return {
       mode: "live",
@@ -331,101 +352,55 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
       statusText: "Connected",
       detail: `${scopeNote} The Agentic sub-account is isolated. Withdrawals are never exposed by the MCP integration.`,
       permissions,
-      supportsTrading: trading,
+      supportsTrading: trading.granted === true,
       withdrawalsExposed: false,
     };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Capability mapping (runtime discovery — no hardcoded tool names)
+// Permission logic (B1): tool presence is corroborated by OAuth scope.
 // ---------------------------------------------------------------------------
 
-function selectTool(capability: "market" | "book" | "balance" | "order", tools: McpTool[]): McpTool | null {
-  const candidates = tools.filter((t) => {
-    const name = t.name.toLowerCase();
-    const desc = (t.description ?? "").toLowerCase();
-    const combined = `${name} ${desc}`;
-    switch (capability) {
-      case "market":
-        return (
-          /\b(ticker|24hr|price)\b/.test(combined) &&
-          !/\b(order|balance|position)\b/.test(name)
-        );
-      case "book":
-        return /\b(order book|orderbook|depth)\b/.test(combined);
-      case "balance":
-        return (
-          /\b(balance|portfolio|account balance|asset balance)\b/.test(combined) &&
-          !/\border\b/.test(name) &&
-          !/\btrade\b/.test(name)
-        );
-      case "order":
-        return (
-          /\b(place|submit|create)\b/.test(combined) &&
-          /\border\b/.test(combined) &&
-          !/\bcancel\b/.test(name) &&
-          t.requiredInputs.some((r) => ["symbol", "side", "quantity", "amount"].includes(r.toLowerCase()))
-        );
-      default:
-        return false;
-    }
-  });
+const TRADING_SCOPE_HINTS = /trade|spot|order|execution|margin|convert|future/i;
 
-  if (candidates.length === 0) return null;
+function tradingPermission(
+  scopes: string[],
+  orderTool: McpTool | null
+): PermissionInfo {
+  // When Binance exposes an auth scope string, corroborate the granted
+  // tools against it. An explicit scope list that contains no trading-like
+  // scope means trading is NOT confirmed.
+  const scopeCorroboration =
+    scopes.length === 0 ? null : scopes.some((s) => TRADING_SCOPE_HINTS.test(s));
 
-  // Prefer a candidate whose schema accepts a freetext "symbol" input.
-  if (capability === "market" || capability === "book") {
-    const withSymbol = candidates.find((t) => t.requiredInputs.includes("symbol"));
-    if (withSymbol) return withSymbol;
+  if (orderTool) {
+    return {
+      id: "spot-trade",
+      label: "Spot trading",
+      granted: true,
+      scopeSource:
+        scopeCorroboration === true
+          ? "agentos-tools/list (create-order tool) + oauth-scope"
+          : "agentos-tools/list (create-order tool)",
+    };
   }
-  return candidates[0];
-}
 
-function buildOrderArgs(
-  tool: McpTool,
-  request: OrderRequest,
-  price: number
-): Record<string, unknown> {
-  const required = new Set(tool.requiredInputs.map((r) => r.toLowerCase()));
-  const args: Record<string, unknown> = {
-    symbol: request.symbol,
-    side: request.side.toUpperCase(),
-    type: "MARKET",
+  if (scopeCorroboration === false) {
+    return {
+      id: "spot-trade",
+      label: "Spot trading",
+      granted: false,
+      scopeSource: "oauth-scope: no trading scope granted",
+    };
+  }
+
+  return {
+    id: "spot-trade",
+    label: "Spot trading",
+    granted: null,
+    scopeSource: "no create-order tool exposed by Agent OS",
   };
-
-  if (required.has("quoteorderqty")) {
-    args.quoteOrderQty = String(round(request.amountQuote, 2));
-  } else if (required.has("quantity")) {
-    args.quantity = formatQuantity(request.amountQuote / price);
-  } else if (required.has("amount")) {
-    args.amount = String(round(request.amountQuote, 2));
-  }
-
-  for (const r of ["symbol", "side", "type"]) {
-    if (required.has(r) && r !== "type" && args[r] === undefined) {
-      args[r] = request.symbol;
-    }
-  }
-
-  // Remove keys the server did not declare so unknown-parameter rejection is
-  // avoided when possible.
-  for (const key of Object.keys(args)) {
-    if (!required.has(key.toLowerCase()) && !["symbol", "side", "type"].includes(key)) {
-      delete args[key];
-    }
-  }
-  return args;
-}
-
-function extractOrderId(text: string, structured: Record<string, unknown> | null): string | null {
-  const candidates: string[] = [];
-  if (structured) {
-    candidates.push(String(pickByKey(structured, ["orderid", "order_id", "clientorderid"]) ?? ""));
-  }
-  const match = text.match(/order[iI]d["'':\s]+([A-Za-z0-9_-]+)/i);
-  if (match) candidates.push(match[1]);
-  return candidates.find((c) => c.length > 0) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,16 +456,6 @@ function pickNumber(object: Record<string, unknown> | null, keys: string[]): num
   return null;
 }
 
-function pickByKey(object: Record<string, unknown> | null, keys: string[]): unknown {
-  if (!object) return null;
-  const flat = new Map<string, unknown>();
-  flattenInto(object, flat);
-  for (const key of keys) {
-    if (flat.has(key.toLowerCase())) return flat.get(key.toLowerCase());
-  }
-  return null;
-}
-
 function array2d(object: Record<string, unknown> | null, key: string): Array<Array<string | number>> | null {
   if (!object) return null;
   const flat = new Map<string, unknown>();
@@ -506,6 +471,13 @@ function array2d(object: Record<string, unknown> | null, key: string): Array<Arr
   return rows;
 }
 
+/**
+ * Extracts the USDT (quote) balance from an account tool result. Only a
+ * balance that is positively identified as USDT/quote is returned. A bare
+ * "free"/"balance" number is never labeled quote balance because it could
+ * be a base-asset balance — mislabeling it would make an unsafe order look
+ * safe.
+ */
 function extractQuoteBalance(object: Record<string, unknown> | null): number | null {
   if (!object) return null;
   const flat = new Map<string, unknown>();
@@ -524,11 +496,8 @@ function extractQuoteBalance(object: Record<string, unknown> | null): number | n
     }
   }
 
-  const direct = pickNumber(object, ["usdtfree", "usdtbalance", "availableusdt", "freeusdt"]);
-  if (direct !== null) return direct;
-
-  const single = flat.get("free") ?? flat.get("available") ?? flat.get("balance");
-  return toNumber(single);
+  // Explicitly USDT-named fields are still legitimate.
+  return pickNumber(object, ["usdtfree", "usdtbalance", "availableusdt", "freeusdt"]);
 }
 
 function toNumber(value: unknown): number | null {
@@ -541,15 +510,23 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
+function extractOrderId(text: string, structured: Record<string, unknown> | null): string | null {
+  const candidates: string[] = [];
+  if (structured) {
+    const flat = new Map<string, unknown>();
+    flattenInto(structured, flat);
+    const byKey =
+      flat.get("orderid") ??
+      flat.get("order_id") ??
+      flat.get("clientorderid") ??
+      flat.get("orderidstring");
+    if (byKey !== undefined) candidates.push(String(byKey));
+  }
+  const match = text.match(/order[iI]d["'':\s]+([A-Za-z0-9_-]+)/i);
+  if (match) candidates.push(match[1]);
+  return candidates.find((c) => c.length > 0) ?? null;
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
-}
-
-function round(value: number, digits: number): number {
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
-}
-
-function formatQuantity(value: number): string {
-  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "") || "0";
 }

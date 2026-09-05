@@ -4,9 +4,18 @@ import type { EvidenceBundle } from "@/lib/types";
 import { Panel, PanelTitle } from "@/components/ui";
 import { fmtUsd, fmtPct } from "@/lib/format";
 
+export function sourceLabelFor(
+  source: "demo" | "agent-os",
+  sample: boolean
+): string {
+  return source === "demo" || sample ? "DETERMINISTIC DEMO" : "BINANCE AGENT OS";
+}
+
 export function EvidencePanel({ evidence }: { evidence: EvidenceBundle | null }) {
   if (!evidence) return null;
   const { market, account, derived } = evidence;
+
+  const sourceLabel = sourceLabelFor(market.source, account.sample);
 
   const observed: Array<[string, string]> = [
     ["Symbol", market.symbol],
@@ -80,7 +89,7 @@ export function EvidencePanel({ evidence }: { evidence: EvidenceBundle | null })
 
   return (
     <Panel className="rl-fadein">
-      <PanelTitle right={<span className="font-mono text-[10px] text-muted">FROM AGENT OS</span>}>Evidence</PanelTitle>
+      <PanelTitle right={<span className="font-mono text-[10px] text-muted">{sourceLabel}</span>}>Evidence</PanelTitle>
       <div className="divide-y divide-line px-4 py-3 text-[13px]">
         <Section label="Observed">
           {observed.map(([k, v]) => (

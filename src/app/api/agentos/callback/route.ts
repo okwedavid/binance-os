@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { completeAuthorization } from "@/lib/agentos/binance/oauth";
-import { AgentOSError } from "@/lib/agentos/adapter";
 
 /**
  * OAuth redirect target after the user authorizes the Agentic sub-account
@@ -15,9 +14,11 @@ export async function GET(req: NextRequest) {
     await completeAuthorization(code, state, req.nextUrl.origin);
     return NextResponse.redirect(new URL("/", req.nextUrl.origin));
   } catch (err) {
-    if (err instanceof AgentOSError) {
-      return NextResponse.redirect(new URL("/?agentos_state=error", req.nextUrl.origin));
-    }
+    void err;
     return NextResponse.redirect(new URL("/?agentos_state=error", req.nextUrl.origin));
   }
+}
+
+export async function POST() {
+  return NextResponse.json({ ok: false, message: "Method not allowed." }, { status: 405 });
 }
