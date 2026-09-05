@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-canvas: #0b0e11;
+  --color-panel: #12161b;
+  --color-panel2: #181e25;
+  --color-panel3: #20262e;
+  --color-line: #232b33;
+  --color-line2: #2e3741;
+  --color-text: #eaecef;
+  --color-muted: #8693a2;
+  --color-acc: #f0b90b;
+  --color-accdim: #b9970f;
+  --color-ok: #16c784;
+  --color-warn: #f0b90b;
+  --color-danger: #ea3943;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #0b0e11;
+  --foreground: #eaecef;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(240, 185, 11, 0.28);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2e3741 transparent;
+}
+
+@keyframes rl-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.rl-pulse {
+  animation: rl-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes rl-fadein {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.rl-fadein {
+  animation: rl-fadein 0.16s ease-out both;
+}
