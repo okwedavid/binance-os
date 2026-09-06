@@ -59,6 +59,7 @@ export function AgentConsole() {
   // be raced by React's batched state updates.
   const executingRef = useRef(false);
   const [execAuth, setExecAuth] = useState<{ token: string; expiresAtMs: number } | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -292,6 +293,7 @@ export function AgentConsole() {
   async function connect() {
     if (connecting) return;
     setConnecting(true);
+    setConnectError(null);
     try {
       const res = await fetch("/api/agentos/connect");
       const data = await res.json();
@@ -299,22 +301,26 @@ export function AgentConsole() {
         window.location.href = data.authorizationUrl;
         return;
       }
+      const message = data.message + (data.detail ? `\n\n${data.detail}` : "");
+      setConnectError(message);
       setMessages((prev) => [
         ...prev,
         {
           role: "agent",
           id: uid(),
-          text: data.message + (data.detail ? `\n\n${data.detail}` : ""),
+          text: message,
           tone: "error",
         },
       ]);
     } catch {
+      const message = "Could not start the Agent OS connection.";
+      setConnectError(message);
       setMessages((prev) => [
         ...prev,
         {
           role: "agent",
           id: uid(),
-          text: "Could not start the Agent OS connection.",
+          text: message,
           tone: "error",
         },
       ]);
@@ -329,6 +335,7 @@ export function AgentConsole() {
     } catch {
       // best-effort
     }
+    setConnectError(null);
     setLiveState((cur) =>
       cur
         ? {
@@ -575,6 +582,7 @@ export function AgentConsole() {
         demoState={demoState}
         liveState={liveState}
         auth={auth}
+        connectError={connectError}
         onConnect={connect}
         connecting={connecting}
         onDisconnect={disconnect}

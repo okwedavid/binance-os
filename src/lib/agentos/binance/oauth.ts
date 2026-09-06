@@ -246,6 +246,151 @@ export function callbackUrl(origin: string): string {
   return new URL(CALLBACK_PATH, `${origin}/`).toString();
 }
 
+/**
+ * Canonical public origin used for every Agent OS OAuth URL.
+ *
+ * Reverse proxies and tunnels can rewrite the request host: in the live
+ * production deployment `req.nextUrl.origin` came through as
+ * `https://localhost:10000`, which would have made Binance dereference a
+ * localhost CIMD document. `AGENT_OS_PUBLIC_BASE_URL` pins the exact
+ * public HTTPS base URL (e.g. `https://binance-risklens.onrender.com`).
+ *
+ * Without the override the request origin is used — and REJECTED in
+ * production when it resolves to a loopback/private hostname or plain
+ * HTTP, so a deployment can never silently advertise an unreachable
+ * client_id or redirect_uri.
+ */
+export function publicOrigin(requestOrigin: string): string {
+  const configured = process.env.AGENT_OS_PUBLIC_BASE_URL?.trim();
+  const candidate = configured && configured.length > 0 ? configured : requestOrigin;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    if (process.env.NODE_ENV === "production") {
+      throw new AgentOSError(
+        "AUTHORIZATION_REQUIRED",
+        "RiskLens could not resolve the public Agent OS origin. Set AGENT_OS_PUBLIC_BASE_URL to this deployment's public HTTPS base URL (e.g. https://binance-risklens.onrender.com)."
+      );
+    }
+    return requestOrigin;
+  }
+  if (process.env.NODE_ENV === "production") {
+    if (isPrivateHostname(parsed.hostname)) {
+      throw new AgentOSError(
+        "AUTHORIZATION_REQUIRED",
+        "The Agent OS Client ID Metadata Document must be served from a public HTTPS origin. Configure AGENT_OS_PUBLIC_BASE_URL (e.g. https://binance-risklens.onrender.com) for this deployment."
+      );
+    }
+    if (parsed.protocol !== "https:") {
+      throw new AgentOSError(
+        "AUTHORIZATION_REQUIRED",
+        "Agent OS authorization requires a public HTTPS origin in production. Configure AGENT_OS_PUBLIC_BASE_URL with an https:// URL."
+      );
+    }
+  }
+  return parsed.origin;
+}
+
+function isPrivateHostname(hostname: string): boolean {
+  const lowered = hostname.toLowerCase();
+  if (lowered === "localhost" || lowered === "0.0.0.0" || lowered === "[::1]" || lowered === "::1") {
+    return true;
+  }
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(lowered)) return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(lowered)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(lowered)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(lowered)) return true;
+  return false;
+}
+
+export interface AuthorizationUrlDiagnostics {
+  hostname: string;
+  pathname: string;
+  protocol: string;
+  client_id: string;
+  redirect_uri: string;
+  response_type: string | null;
+  scope: string | null;
+  code_challenge_method: string | null;
+  hasState: boolean;
+  hasPkceChallenge: boolean;
+}
+
+/**
+ * Safe, secret-free summary of the built authorization URL — used for
+ * server-side validation and diagnostics. Never includes access tokens,
+ * codes, PKCE verifier values, or cookie data. Opaque one-time values
+ * (`state`, `code_challenge`) are reduced to presence booleans.
+ */
+export function summarizeAuthorizationUrl(url: URL): AuthorizationUrlDiagnostics {
+  const params = url.searchParams;
+  const state = params.get("state");
+  const challenge = params.get("code_challenge");
+  return {
+    hostname: url.hostname,
+    pathname: url.pathname,
+    protocol: url.protocol,
+    client_id: params.get("client_id") ?? "",
+    redirect_uri: params.get("redirect_uri") ?? "",
+    response_type: params.get("response_type"),
+    scope: params.get("scope"),
+    code_challenge_method: params.get("code_challenge_method"),
+    hasState: Boolean(state && state.length > 0),
+    hasPkceChallenge: Boolean(challenge && challenge.length > 0),
+  };
+}
+
+function hostnameOf(value: string): string {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Verifies that an authorization URL produced by the SDK is complete and
+ * well-formed before the browser is redirected to it. Throws instead of
+ * silently sending a broken URL that Binance would reject — including the
+ * exact production failure where `client_id` / `redirect_uri` resolved to
+ * an internal origin.
+ */
+export function assertWellFormedAuthorizationUrl(
+  url: URL,
+  expectedRedirectUri: string
+): void {
+  const diagnostics = summarizeAuthorizationUrl(url);
+  let problem: string | null = null;
+  if (diagnostics.protocol !== "https:") {
+    problem = "the authorization URL is not HTTPS";
+  } else if (!diagnostics.client_id) {
+    problem = "the OAuth client_id is missing";
+  } else if (hostnameOf(diagnostics.client_id) !== hostnameOf(expectedRedirectUri)) {
+    problem = "the client_id does not match this deployment's public origin";
+  } else if (!diagnostics.redirect_uri) {
+    problem = "the redirect_uri is missing";
+  } else if (diagnostics.redirect_uri !== expectedRedirectUri) {
+    problem = "the redirect_uri does not match the deployment callback";
+  } else if (diagnostics.response_type !== "code") {
+    problem = "the response_type is not 'code'";
+  } else if (!diagnostics.hasPkceChallenge) {
+    problem = "the PKCE code_challenge is missing";
+  } else if (diagnostics.code_challenge_method !== "S256") {
+    problem = "the PKCE method is not S256";
+  } else if (!diagnostics.hasState) {
+    problem = "the OAuth state is missing";
+  } else if (!diagnostics.scope) {
+    problem = "the OAuth scope is missing";
+  }
+  if (problem) {
+    throw new AgentOSError(
+      "INVALID_REQUEST",
+      `RiskLens produced a malformed Agent OS authorization URL: ${problem}.`
+    );
+  }
+}
+
 /** OAuth scope actually requested from Binance Agent OS. */
 export function requestedScope(): string {
   const configured = process.env.AGENT_OS_SCOPE?.trim();
@@ -465,7 +610,8 @@ export async function authCapability(): Promise<AuthCapability> {
  * the PUBLIC client identity, then persist PKCE verifier + CSRF state in
  * httpOnly cookies and return the URL the browser should be redirected to.
  */
-export async function beginAuthorization(origin: string): Promise<URL> {
+export async function beginAuthorization(requestOrigin: string): Promise<URL> {
+  const origin = publicOrigin(requestOrigin);
   assertSecureOrigin(origin);
 
   const { discoverOAuthServerInfo, registerClient, startAuthorization } = await import(
@@ -513,17 +659,29 @@ export async function beginAuthorization(origin: string): Promise<URL> {
   // environment instead, so a client secret never reaches a cookie.
   await persistClientInfo(publicClientInformation(clientInformation));
 
+  const expectedCallback = callbackUrl(origin);
   const state = randomToken();
   const { authorizationUrl, codeVerifier } = await startAuthorization(
     authorizationServerUrl,
     {
       metadata,
       clientInformation,
-      redirectUrl: callbackUrl(origin),
+      redirectUrl: expectedCallback,
       scope: requestedScope(),
       state,
       resource: new URL(AGENT_OS_MCP_URL),
     }
+  );
+
+  // Runtime guard: never redirect the browser to a malformed URL. The
+  // browser may fail to REACH Binance (network/geo), but it must never be
+  // sent a URL that Binance itself would reject.
+  assertWellFormedAuthorizationUrl(authorizationUrl, expectedCallback);
+
+  // Safe server-side diagnostics: no tokens, no codes, no opaque values.
+  console.log(
+    "[risklens:agentos] authorization URL ready",
+    JSON.stringify(summarizeAuthorizationUrl(authorizationUrl))
   );
 
   const { cookies } = await import("next/headers");
@@ -542,8 +700,9 @@ export async function beginAuthorization(origin: string): Promise<URL> {
 export async function completeAuthorization(
   code: string | null,
   state: string | null,
-  origin: string
+  requestOrigin: string
 ): Promise<{ scope: string | undefined }> {
+  const origin = publicOrigin(requestOrigin);
   assertSecureOrigin(origin);
 
   const { discoverOAuthServerInfo, exchangeAuthorization } = await import(

@@ -4,6 +4,7 @@ import type { ReadonlyRequestCookies } from "next/dist/server/web/spec-extension
 import type { AuthorizationServerMetadata } from "@modelcontextprotocol/sdk/shared/auth.js";
 import {
   assertSecureOrigin,
+  assertWellFormedAuthorizationUrl,
   callbackUrl,
   cimdClientInformation,
   clientMetadataDocument,
@@ -12,11 +13,13 @@ import {
   DEFAULT_SCOPE,
   detectMechanism,
   publicClientInformation,
+  publicOrigin,
   readStoredSessionFrom,
   requestedScope,
   resolveAuthClient,
   selectClientMechanism,
   stateMatches,
+  summarizeAuthorizationUrl,
 } from "./oauth";
 import { resolveServerMode } from "@/lib/server-mode";
 import {
@@ -422,5 +425,208 @@ describe("demo/live separation and execution guards", () => {
     const result = authorizeExecution({ token, order, bind: "session-b" });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("binding-mismatch");
+  });
+});
+
+function buildAuthorizationUrl(
+  overrides: {
+    clientId?: string | null;
+    redirectUri?: string | null;
+    responseType?: string | null;
+    scope?: string | null;
+    state?: string | null;
+    challenge?: string | null;
+    challengeMethod?: string | null;
+  } = {}
+): URL {
+  const url = new URL("https://accounts.binance.com/agentic-oauth/authorize");
+  const params = url.searchParams;
+  if (overrides.clientId !== null) {
+    params.set("client_id", overrides.clientId ?? clientMetadataUrl(PROD_ORIGIN));
+  }
+  if (overrides.redirectUri !== null) {
+    params.set("redirect_uri", overrides.redirectUri ?? callbackUrl(PROD_ORIGIN));
+  }
+  if (overrides.responseType !== null) {
+    params.set("response_type", overrides.responseType ?? "code");
+  }
+  if (overrides.scope !== null) {
+    params.set("scope", overrides.scope ?? "market_data account trade");
+  }
+  if (overrides.state !== null) {
+    params.set("state", overrides.state ?? "abc123");
+  }
+  if (overrides.challenge !== null) {
+    params.set("code_challenge", overrides.challenge ?? "challenge");
+  }
+  if (overrides.challengeMethod !== null) {
+    params.set("code_challenge_method", overrides.challengeMethod ?? "S256");
+  }
+  return url;
+}
+
+describe("authorization URL construction", () => {
+  it("accepts a well-formed URL with the discovered Binance authorization endpoint", () => {
+    const url = buildAuthorizationUrl();
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).not.toThrow();
+    expect(url.hostname).toBe("accounts.binance.com");
+    expect(url.pathname).toBe("/agentic-oauth/authorize");
+  });
+
+  it("keeps the exact CIMD client_id and redirect URI in the URL", () => {
+    const url = buildAuthorizationUrl();
+    expect(url.searchParams.get("client_id")).toBe(clientMetadataUrl(PROD_ORIGIN));
+    expect(url.searchParams.get("redirect_uri")).toBe(callbackUrl(PROD_ORIGIN));
+    expect(url.searchParams.get("scope")).toBe("market_data account trade");
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.has("state")).toBe(true);
+    expect(url.searchParams.has("code_challenge")).toBe(true);
+  });
+
+  it("rejects a URL whose client_id points at a different origin (the localhost production bug)", () => {
+    const url = buildAuthorizationUrl({
+      clientId: "https://localhost:10000/api/agentos/client-metadata.json",
+    });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/client_id does not match this deployment's public origin/);
+  });
+
+  it("rejects a URL missing the PKCE challenge", () => {
+    const url = buildAuthorizationUrl({ challenge: null });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/PKCE code_challenge is missing/);
+  });
+
+  it("rejects a URL with a non-S256 PKCE method", () => {
+    const url = buildAuthorizationUrl({ challengeMethod: "plain" });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/PKCE method is not S256/);
+  });
+
+  it("rejects a URL missing the OAuth state", () => {
+    const url = buildAuthorizationUrl({ state: null });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/OAuth state is missing/);
+  });
+
+  it("rejects a URL missing the scope", () => {
+    const url = buildAuthorizationUrl({ scope: null });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/OAuth scope is missing/);
+  });
+
+  it("rejects a URL whose redirect URI does not match the deployment callback", () => {
+    const url = buildAuthorizationUrl({ redirectUri: "https://evil.example/callback" });
+    expect(() =>
+      assertWellFormedAuthorizationUrl(url, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/redirect_uri does not match/);
+  });
+
+  it("rejects a non-HTTPS authorization URL", () => {
+    const url = buildAuthorizationUrl();
+    const httpUrl = new URL(`http:${url.href.slice(url.href.indexOf("//"))}`);
+    expect(() =>
+      assertWellFormedAuthorizationUrl(httpUrl, callbackUrl(PROD_ORIGIN))
+    ).toThrow(/not HTTPS/);
+  });
+});
+
+describe("authorization URL diagnostics never leak secrets", () => {
+  it("reduces state and code_challenge to presence booleans", () => {
+    const url = buildAuthorizationUrl({ state: "TOPSECRETSTATE", challenge: "TOPSECRETCHALLENGE" });
+    const diagnostics = summarizeAuthorizationUrl(url);
+    expect(diagnostics.hasState).toBe(true);
+    expect(diagnostics.hasPkceChallenge).toBe(true);
+    expect("state" in diagnostics).toBe(false);
+    expect("code_challenge" in diagnostics).toBe(false);
+    expect(JSON.stringify(diagnostics)).not.toContain("TOPSECRETSTATE");
+    expect(JSON.stringify(diagnostics)).not.toContain("TOPSECRETCHALLENGE");
+  });
+
+  it("reports exact expression fields and never a secret", () => {
+    const url = buildAuthorizationUrl();
+    const diagnostics = summarizeAuthorizationUrl(url);
+    expect(diagnostics.hostname).toBe("accounts.binance.com");
+    expect(diagnostics.pathname).toBe("/agentic-oauth/authorize");
+    expect(diagnostics.client_id).toBe(clientMetadataUrl(PROD_ORIGIN));
+    expect(diagnostics.redirect_uri).toBe(callbackUrl(PROD_ORIGIN));
+    expect(diagnostics.response_type).toBe("code");
+    expect(diagnostics.scope).toBe("market_data account trade");
+    expect(diagnostics.code_challenge_method).toBe("S256");
+    expect(JSON.stringify(diagnostics)).not.toContain("client_secret");
+  });
+});
+
+describe("AGENT_OS_PUBLIC_BASE_URL (canonical public origin)", () => {
+  it("uses the configured public base URL even when the request origin is internal", () => {
+    withEnv(
+      {
+        AGENT_OS_PUBLIC_BASE_URL: "https://binance-risklens.onrender.com",
+        NODE_ENV: "production",
+      },
+      () => {
+        expect(publicOrigin("https://localhost:10000")).toBe(
+          "https://binance-risklens.onrender.com"
+        );
+      }
+    );
+  });
+
+  it("normalizes a configured base URL that carries a path or trailing slash", () => {
+    withEnv({ AGENT_OS_PUBLIC_BASE_URL: "https://binance-risklens.onrender.com/xyz/" }, () => {
+      expect(publicOrigin("https://localhost:10000")).toBe(
+        "https://binance-risklens.onrender.com"
+      );
+    });
+  });
+
+  it("falls back to the request origin outside production (local development)", () => {
+    withEnv(
+      { AGENT_OS_PUBLIC_BASE_URL: undefined, NODE_ENV: "test" },
+      () => {
+        expect(publicOrigin("https://localhost:10000")).toBe("https://localhost:10000");
+      }
+    );
+  });
+
+  it("rejects a loopback/private request origin in production when not configured", () => {
+    withEnv(
+      { AGENT_OS_PUBLIC_BASE_URL: undefined, NODE_ENV: "production" },
+      () => {
+        expect(() => publicOrigin("https://localhost:10000")).toThrow(
+          /AGENT_OS_PUBLIC_BASE_URL/
+        );
+        expect(() => publicOrigin("http://192.168.0.5:3000")).toThrow(
+          /AGENT_OS_PUBLIC_BASE_URL/
+        );
+      }
+    );
+  });
+
+  it("rejects plain HTTP in production", () => {
+    withEnv(
+      { AGENT_OS_PUBLIC_BASE_URL: undefined, NODE_ENV: "production" },
+      () => {
+        expect(() => publicOrigin("http://binance-risklens.onrender.com")).toThrow(
+          /AGENT_OS_PUBLIC_BASE_URL/
+        );
+      }
+    );
+  });
+
+  it("allows a public HTTPS origin in production", () => {
+    withEnv({ NODE_ENV: "production" }, () => {
+      expect(() =>
+        publicOrigin("https://binance-risklens.onrender.com")
+      ).not.toThrow();
+    });
   });
 });

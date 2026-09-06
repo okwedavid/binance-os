@@ -180,7 +180,15 @@ On Render (HTTPS) the CIMD flow works without any Binance client registration
 or API key:
 
 1. Set `RL_COOKIE_SECRET` to a 16+ character value in the Render environment.
-2. After deploy, verify the metadata document is served correctly:
+2. **Required:** set `AGENT_OS_PUBLIC_BASE_URL` to the deployment's public
+   HTTPS URL, e.g. `https://binance-risklens.onrender.com`. This is the
+   canonical public origin. Render (or a proxy/tunnel) rewrites the upstream
+   request host to an internal address (observed as `https://localhost:10000`),
+   so the server cannot reliably infer the public URL on its own. Without this
+   variable, production fails closed with an actionable error because Binance
+   could not dereference the client metadata document or return to the
+   callback.
+3. After deploy, verify the metadata document is served correctly:
 
    ```
    GET https://binance-risklens.onrender.com/api/agentos/client-metadata.json
@@ -189,7 +197,7 @@ or API key:
    The response should contain a JSON object whose `client_id` field is the
    exact request URL, and whose `redirect_uris` contains the callback URL
    `https://binance-risklens.onrender.com/api/agentos/callback`.
-3. The "Connect Agent OS" button in the settings panel becomes available
+4. The "Connect Agent OS" button in the settings panel becomes available
    automatically once the server can reach Binance's authorization discovery
    endpoint — no further configuration is needed.
 

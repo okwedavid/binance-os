@@ -111,15 +111,15 @@ export function Button({
   type?: "button" | "submit";
 }) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-acc disabled:cursor-not-allowed disabled:opacity-40";
+    "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-all duration-150 ease-in-out cursor-pointer select-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-acc active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100";
   const styles =
     variant === "primary"
-      ? "bg-acc text-black hover:bg-accdim"
+      ? "bg-acc text-black shadow-sm hover:bg-accdim active:bg-accdim"
       : variant === "secondary"
-        ? "border border-line2 bg-panel3 text-text hover:bg-panel2"
+        ? "border border-line2 bg-panel3 text-text shadow-sm hover:bg-panel2 active:bg-panel2"
         : variant === "danger"
-          ? "border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20"
-          : "text-muted hover:text-text";
+          ? "border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20 active:bg-danger/20"
+          : "text-muted hover:bg-panel/60 hover:text-text active:bg-panel2";
   return (
     <button
       type={type}

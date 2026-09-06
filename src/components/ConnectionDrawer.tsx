@@ -3,6 +3,7 @@
 import type { AuthCapability, ConnectionState, Mode } from "@/lib/types";
 import type { DemoScenario } from "@/lib/demo/data";
 import { Panel, StatusDot, Button } from "@/components/ui";
+import { authReadyCapability, connectActionLabel } from "@/components/connect-state";
 
 const SCENARIOS: Array<{
   id: DemoScenario;
@@ -36,6 +37,7 @@ export function ConnectionDrawer({
   demoState,
   liveState,
   auth,
+  connectError,
   onConnect,
   connecting,
   onDisconnect,
@@ -49,6 +51,7 @@ export function ConnectionDrawer({
   demoState: ConnectionState | null;
   liveState: ConnectionState | null;
   auth?: AuthCapability | null;
+  connectError?: string | null;
   onConnect: () => void;
   connecting: boolean;
   onDisconnect: () => void;
@@ -57,10 +60,13 @@ export function ConnectionDrawer({
   // OAuth capability of THIS deployment — never assumed from client-side
   // clicks. The button is never permanently disabled; when setup is required
   // it stays clickable so it can surface the server's recoverable error.
-  const authReady =
-    auth === null || auth === undefined
-      ? false
-      : auth.supported === true && auth.configured === true;
+  const authReady = authReadyCapability(auth);
+  const actionLabel = connectActionLabel({
+    authReady,
+    connected: liveState?.connected === true,
+    connecting,
+    error: Boolean(connectError),
+  });
   return (
     <div
       className={`fixed inset-0 z-50 ${open ? "" : "pointer-events-none"}`}
@@ -103,12 +109,18 @@ export function ConnectionDrawer({
                 onClick={() => onModeChange("demo")}
               />
               <ModeCard
-                active={mode === "live"}
+                active={mode === "live" && liveState?.connected === true}
                 title="Live"
                 description="Requires a verified Agent OS connection."
                 onClick={() => onModeChange("live")}
               />
             </div>
+            {mode === "demo" && !liveState?.connected && (
+              <p className="mt-2 text-[11px] leading-relaxed text-muted">
+                Live Mode activates after Agent OS is connected — select Live,
+                then connect Agent OS below.
+              </p>
+            )}
           </section>
 
           {mode === "demo" && (
@@ -121,10 +133,10 @@ export function ConnectionDrawer({
                   <button
                     key={s.id}
                     onClick={() => onScenarioChange(s.id)}
-                    className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                    className={`w-full cursor-pointer rounded-lg border px-3 py-2.5 text-left transition-all duration-150 ease-in-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-acc active:scale-[0.98] ${
                       scenario === s.id
                         ? "border-acc/60 bg-acc/10"
-                        : "border-line bg-panel hover:border-line2"
+                        : "border-line bg-panel hover:border-line2 hover:bg-panel2"
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -205,32 +217,27 @@ export function ConnectionDrawer({
               <Button variant="secondary" onClick={onDisconnect} className="w-full">
                 Disconnect Agent OS
               </Button>
-            ) : authReady ? (
+            ) : (
               <Button
-                variant="primary"
+                variant={authReady ? "primary" : "secondary"}
                 onClick={onConnect}
                 disabled={connecting}
                 className="w-full"
               >
-                {connecting ? "Opening Binance…" : "Connect Agent OS"}
-              </Button>
-            ) : (
-              <Button
-                variant="secondary"
-                onClick={onConnect}
-                disabled={connecting}
-                className="w-full cursor-default"
-              >
-                Agent OS Setup Required
+                {actionLabel}
               </Button>
             )}
 
-            {!authReady && (
+            {connectError ? (
+              <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] leading-relaxed text-danger">
+                {connectError}
+              </div>
+            ) : !authReady ? (
               <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-relaxed text-muted">
                 {auth?.detail ??
                   "Agent OS setup is required on this deployment before RiskLens can connect to Binance. No API key is needed — the deployment only needs to be reachable over public HTTPS for Binance to accept its OAuth client metadata."}
               </div>
-            )}
+            ) : null}
           </section>
 
           <section className="rounded-lg border border-line bg-panel px-4 py-3 text-[12px] leading-relaxed text-muted">
@@ -260,10 +267,10 @@ function ModeCard({
   return (
     <button
       onClick={onClick}
-      className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+      className={`cursor-pointer rounded-lg border px-3 py-2.5 text-left transition-all duration-150 ease-in-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-acc active:scale-[0.98] ${
         active
-          ? "border-acc/60 bg-acc/10"
-          : "border-line bg-panel hover:border-line2"
+          ? "border-acc/70 bg-acc/10 shadow-sm"
+          : "border-line bg-panel hover:border-line2 hover:bg-panel2"
       }`}
     >
       <div className="text-sm font-semibold text-text">{title}</div>

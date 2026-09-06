@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   assertSecureOrigin,
   clientMetadataDocument,
+  publicOrigin,
 } from "@/lib/agentos/binance/oauth";
 
 /**
@@ -13,20 +14,24 @@ import {
  * before authorizing, so it must be served at the same HTTPS origin that
  * hosts the redirect callback and the exact `client_id` string must match.
  *
- * The document is derived from the server request origin on every call —
- * the Render hostname is never hardcoded. Non-HTTPS origins are rejected
- * in production.
+ * The document origin is resolved from `AGENT_OS_PUBLIC_BASE_URL` (the
+ * canonical public base URL) and only falls back to the request origin when
+ * that override is unset. Behind proxy/tunnel deployments the request
+ * origin can be an internal address (observed in production as
+ * `https://localhost:10000`), which would make Binance dereference an
+ * unreachable document — that configuration is rejected in production.
  */
 export async function GET(req: NextRequest) {
   let origin: string;
   try {
-    origin = req.nextUrl.origin;
+    origin = publicOrigin(req.nextUrl.origin);
     assertSecureOrigin(origin);
-  } catch {
-    return NextResponse.json(
-      { error: "Agent OS client metadata requires an HTTPS deployment origin." },
-      { status: 400 }
-    );
+  } catch (err) {
+    const message =
+      err instanceof Error
+        ? err.message
+        : "Agent OS client metadata requires a public HTTPS deployment origin.";
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 
   return NextResponse.json(clientMetadataDocument(origin), {
