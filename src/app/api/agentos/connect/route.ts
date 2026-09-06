@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
           ok: false,
           message:
             err.code === "AUTHORIZATION_REQUIRED"
-              ? "Agent OS authorization is not available for this deployment."
+              ? "Agent OS authorization could not start for this deployment."
               : "Could not start the Agent OS connection.",
           detail: err.message,
         },

@@ -80,15 +80,31 @@ all MCP traffic happens in Next.js route handlers (serverless-safe: one fresh
 session per request, no long-lived in-memory state).
 
 - **OAuth only, no API keys.** The authorization server is discovered from
-  the MCP endpoint. RiskLens tries Dynamic Client Registration for this web
-  origin and otherwise reuses credentials from `AGENT_OS_CLIENT_ID`.
+  the MCP endpoint. Binance does not run Dynamic Client Registration; it
+  supports **Client ID Metadata Documents (CIMD)**. RiskLens serves its
+  metadata document at `GET /api/agentos/client-metadata.json` and uses the
+  document's exact HTTPS URL as the OAuth `client_id`. The redirect callback
+  is the exact, server-derived `/api/agentos/callback` and the client is
+  public (`token_endpoint_auth_method: "none"`, PKCE-S256), so **no client
+  secret and no registration step are involved**. `AGENT_OS_CLIENT_ID` /
+  `AGENT_OS_CLIENT_SECRET` remain optional environment-only overrides for
+  pre-registered clients — the secret is resolved at exchange/refresh time
+  and never stored in a cookie. The requested scope defaults to
+  `market_data account trade` (`AGENT_OS_SCOPE`).
 - Tokens live only in **httpOnly cookies** (`rl_agentos_session` and friends)
   — never in client JS or localStorage. Cookie values are HMAC-signed; set
   `RL_COOKIE_SECRET` so the key is stable across restarts (a per-process
-  random fallback is used otherwise).
+  random fallback is used otherwise). Only the **public** client identity is
+  ever persisted in a cookie.
 - **Server-authoritative mode.** The request body may only express intent:
   "live" without a server-verified Agent OS session is a hard, typed failure,
   never a silent demo downgrade.
+- **Honest connect states.** `/api/agentos/status` reports the deployment's
+  OAuth capability (`auth`): when the CIMD document can be served over HTTPS
+  the UI shows "Connect Agent OS"; otherwise "Agent OS Setup Required" with
+  the server's reason. The button is never permanently disabled, and
+  `connected: true` is only ever set by a server-verified session — clicking
+  "Connect" alone never claims connectivity.
 - **Tool names are never hardcoded.** Tools are discovered at runtime from
   the server's own `tools/list` response and matched to capabilities by
   strict schema heuristics; a create-order tool is only trusted when the
@@ -153,7 +169,29 @@ src/components/…                       UI (console, Action Card, evidence, tra
 ## Config
 
 See `.env.example`. All values optional; defaults target the official
-Binance Agent OS MCP endpoint.
+Binance Agent OS MCP endpoint and scope (`market_data account trade`).
+`RL_COOKIE_SECRET` is recommended in production (cookie signature stability).
+`AGENT_OS_CLIENT_ID` / `AGENT_OS_CLIENT_SECRET` are optional pre-registered
+client overrides — RiskLens normally uses the CIMD flow automatically.
+
+### Deploying to Render
+
+On Render (HTTPS) the CIMD flow works without any Binance client registration
+or API key:
+
+1. Set `RL_COOKIE_SECRET` to a 16+ character value in the Render environment.
+2. After deploy, verify the metadata document is served correctly:
+
+   ```
+   GET https://binance-risklens.onrender.com/api/agentos/client-metadata.json
+   ```
+
+   The response should contain a JSON object whose `client_id` field is the
+   exact request URL, and whose `redirect_uris` contains the callback URL
+   `https://binance-risklens.onrender.com/api/agentos/callback`.
+3. The "Connect Agent OS" button in the settings panel becomes available
+   automatically once the server can reach Binance's authorization discovery
+   endpoint — no further configuration is needed.
 
 ## Known limitations
 

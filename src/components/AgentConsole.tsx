@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AgentOSStatusResponse,
   AgentResponse,
+  AuthCapability,
   ConnectionState,
   EvidenceBundle,
   Mode,
@@ -45,6 +47,7 @@ export function AgentConsole() {
   const [scenario, setScenario] = useState<DemoScenario>("healthy");
   const [demoState, setDemoState] = useState<ConnectionState | null>(null);
   const [liveState, setLiveState] = useState<ConnectionState | null>(null);
+  const [auth, setAuth] = useState<AuthCapability | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [messages, setMessages] = useState<ConsoleMessage[]>([GREETING]);
   const [input, setInput] = useState("");
@@ -67,9 +70,13 @@ export function AgentConsole() {
         fetch("/api/agentos/status?mode=demo&scenario=healthy"),
         fetch("/api/agentos/status?mode=live"),
       ]);
-      const demo = (await demoRes.json()) as { ok: boolean; state: ConnectionState };
-      const live = (await liveRes.json()) as { ok: boolean; state: ConnectionState };
-      return { demo: demo.state, live: live.state };
+      const demo = (await demoRes.json()) as AgentOSStatusResponse;
+      const live = (await liveRes.json()) as AgentOSStatusResponse;
+      return {
+        demo: demo.state,
+        live: live.state,
+        auth: live.auth ?? demo.auth,
+      };
     } catch {
       return null;
     }
@@ -80,6 +87,7 @@ export function AgentConsole() {
       if (states) {
         setDemoState(states.demo);
         setLiveState(states.live);
+        setAuth(states.auth ?? null);
       }
     });
     let storedScenario: string | null = null;
@@ -372,6 +380,7 @@ export function AgentConsole() {
                   if (states) {
                     setDemoState(states.demo);
                     setLiveState(states.live);
+                    setAuth(states.auth ?? null);
                   }
                 });
               }}
@@ -531,6 +540,7 @@ export function AgentConsole() {
                 setExecAuth(null);
                 setDemoState(states.demo);
                 setLiveState(states.live);
+                setAuth(states.auth ?? null);
               } else {
                 setNotice(
                   "Live mode requires a verified Agent OS connection first. Connect from this panel."
@@ -547,6 +557,7 @@ export function AgentConsole() {
             if (states) {
               setDemoState(states.demo);
               setLiveState(states.live);
+              setAuth(states.auth ?? null);
             }
           });
         }}
@@ -557,11 +568,13 @@ export function AgentConsole() {
             if (states) {
               setDemoState(states.demo);
               setLiveState(states.live);
+              setAuth(states.auth ?? null);
             }
           });
         }}
         demoState={demoState}
         liveState={liveState}
+        auth={auth}
         onConnect={connect}
         connecting={connecting}
         onDisconnect={disconnect}

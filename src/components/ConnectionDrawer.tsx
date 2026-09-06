@@ -1,6 +1,6 @@
 "use client";
 
-import type { ConnectionState, Mode } from "@/lib/types";
+import type { AuthCapability, ConnectionState, Mode } from "@/lib/types";
 import type { DemoScenario } from "@/lib/demo/data";
 import { Panel, StatusDot, Button } from "@/components/ui";
 
@@ -35,6 +35,7 @@ export function ConnectionDrawer({
   onScenarioChange,
   demoState,
   liveState,
+  auth,
   onConnect,
   connecting,
   onDisconnect,
@@ -47,10 +48,19 @@ export function ConnectionDrawer({
   onScenarioChange: (scenario: DemoScenario) => void;
   demoState: ConnectionState | null;
   liveState: ConnectionState | null;
+  auth?: AuthCapability | null;
   onConnect: () => void;
   connecting: boolean;
   onDisconnect: () => void;
 }) {
+  // Honest three-way button state. `authReady` reflects the server-reported
+  // OAuth capability of THIS deployment — never assumed from client-side
+  // clicks. The button is never permanently disabled; when setup is required
+  // it stays clickable so it can surface the server's recoverable error.
+  const authReady =
+    auth === null || auth === undefined
+      ? false
+      : auth.supported === true && auth.configured === true;
   return (
     <div
       className={`fixed inset-0 z-50 ${open ? "" : "pointer-events-none"}`}
@@ -195,7 +205,7 @@ export function ConnectionDrawer({
               <Button variant="secondary" onClick={onDisconnect} className="w-full">
                 Disconnect Agent OS
               </Button>
-            ) : (
+            ) : authReady ? (
               <Button
                 variant="primary"
                 onClick={onConnect}
@@ -204,6 +214,22 @@ export function ConnectionDrawer({
               >
                 {connecting ? "Opening Binance…" : "Connect Agent OS"}
               </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                onClick={onConnect}
+                disabled={connecting}
+                className="w-full cursor-default"
+              >
+                Agent OS Setup Required
+              </Button>
+            )}
+
+            {!authReady && (
+              <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-relaxed text-muted">
+                {auth?.detail ??
+                  "Agent OS setup is required on this deployment before RiskLens can connect to Binance. No API key is needed — the deployment only needs to be reachable over public HTTPS for Binance to accept its OAuth client metadata."}
+              </div>
             )}
           </section>
 

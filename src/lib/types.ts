@@ -140,6 +140,25 @@ export interface ConnectionState {
   withdrawalsExposed: boolean;
 }
 
+/**
+ * Server-reported Agent OS OAuth capability for this deployment. The
+ * browser uses this to decide between "Agent OS Setup Required",
+ * "Connect Agent OS", and "Agent OS Connected" — connected is only ever
+ * true after a server-verified session.
+ */
+export interface AuthCapability {
+  supported: boolean;
+  mechanism: "pre_registered" | "cimd" | "dcr" | "none";
+  configured: boolean;
+  detail?: string;
+}
+
+export interface AgentOSStatusResponse {
+  ok: boolean;
+  state: ConnectionState;
+  auth: AuthCapability;
+}
+
 export type AgentResponse =
   | {
       ok: true;
