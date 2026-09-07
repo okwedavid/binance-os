@@ -187,10 +187,23 @@ export class BinanceAgentOSAdapter implements AgentOSAdapter {
       const args = buildOrderArgs(orderTool, request, price);
       const result = await session.callTool(orderTool.name, args);
       const text = result.text ?? "Order accepted by Agent OS.";
+      const fill = extractFillFields(result.structured, text, request);
       return {
         ok: true,
         simulated: false,
-        orderId: extractOrderId(text, result.structured),
+        orderId: fill.orderId,
+        status: fill.status,
+        side: request.side,
+        symbol: request.symbol,
+        baseAsset: request.market?.baseAsset ?? request.symbol.replace(/USDT$/, ""),
+        quoteAsset: request.market?.quoteAsset ?? "USDT",
+        amount: request.amount ?? request.amountQuote,
+        filledQuantity: fill.filledQuantity,
+        executionPrice: fill.executionPrice,
+        fee: fill.fee,
+        feeAsset: fill.feeAsset ?? undefined,
+        sourceLabel: "BINANCE AGENT OS",
+        submittedAtMs: Date.now(),
         message: text,
       };
     });
@@ -525,6 +538,103 @@ function extractOrderId(text: string, structured: Record<string, unknown> | null
   const match = text.match(/order[iI]d["'':\s]+([A-Za-z0-9_-]+)/i);
   if (match) candidates.push(match[1]);
   return candidates.find((c) => c.length > 0) ?? null;
+}
+
+/**
+ * Best-effort, honestly-sourced fill fields from the Binance Agent OS order
+ * response. Every field stays null unless Binance actually reported it — a
+ * fill is never fabricated into a live result.
+ */
+function extractFillFields(
+  structured: Record<string, unknown> | null,
+  text: string,
+  request: OrderRequest
+): {
+  orderId: string | null;
+  status: ExecutionResult["status"];
+  filledQuantity: number | null;
+  executionPrice: number | null;
+  fee: number | null;
+  feeAsset: string | null;
+} {
+  const flat = new Map<string, unknown>();
+  if (structured) flattenInto(structured, flat);
+
+  const orderId = extractOrderId(text, structured);
+
+  const statusRaw = String(flat.get("status") ?? "").toUpperCase();
+  const statusText = `${statusRaw} ${text}`.toUpperCase();
+  let status: ExecutionResult["status"];
+  if (statusRaw === "FILLED") status = "FILLED";
+  else if (statusRaw === "REJECTED" || statusRaw === "EXPIRED" || statusRaw === "CANCELED") status = "REJECTED";
+  else if (/\bFILLED\b/.test(statusText)) status = "FILLED";
+  else status = "SUBMITTED";
+
+  const filledQuantity = pickNumber(structured, [
+    "executedqty",
+    "executedquantity",
+    "cumulativefilledquantity",
+    "cumulativeqty",
+    "filledquantity",
+  ]);
+
+  const executionPrice = pickNumber(structured, [
+    "avgprice",
+    "averageprice",
+    "price",
+    "lastprice",
+  ]);
+
+  let fee: number | null = null;
+  let feeAsset: string | null = null;
+  if (structured) {
+    const arrays = ["fills", "tradefills", "fill"];
+    for (const key of arrays) {
+      const rows = array2dLoose(structured, key);
+      if (rows && rows.length > 0) {
+        const sum = rows.reduce((acc, row) => acc + row.commission, 0);
+        fee = isFiniteNumber(sum) && sum > 0 ? sum : null;
+        feeAsset = rows.find((r) => typeof r.commissionAsset === "string" && r.commissionAsset.length > 0)?.commissionAsset ?? null;
+        break;
+      }
+    }
+    if (fee === null) fee = pickNumber(structured, ["commission", "commissionsum", "totalfees"]);
+    if (!feeAsset) feeAsset = String(flat.get("commissionasset") ?? "").toUpperCase() || null;
+  }
+
+  void request;
+  return {
+    orderId,
+    status,
+    filledQuantity,
+    executionPrice,
+    fee,
+    feeAsset,
+  };
+}
+
+interface LooseRow {
+  commission: number;
+  commissionAsset?: string;
+}
+
+function array2dLoose(object: Record<string, unknown> | null, key: string): LooseRow[] | null {
+  if (!object) return null;
+  const flat = new Map<string, unknown>();
+  flattenInto(object, flat);
+  const value = flat.get(key.toLowerCase());
+  if (!Array.isArray(value)) return null;
+  const rows: LooseRow[] = [];
+  for (const row of value) {
+    if (row === null || typeof row !== "object") continue;
+    const entry = row as Record<string, unknown>;
+    const commission = toNumber(entry.commission ?? entry.commissionamount ?? entry.fee);
+    rows.push({
+      commission: commission ?? 0,
+      commissionAsset: typeof entry.commissionAsset === "string" ? entry.commissionAsset.toUpperCase() : undefined,
+    });
+  }
+  return rows;
 }
 
 function isFiniteNumber(value: unknown): value is number {

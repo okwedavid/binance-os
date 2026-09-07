@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import { handleCommand, handleExecute } from "./orchestrator";
 import type { AgentOSAdapter } from "@/lib/agentos/adapter";
 import { AgentOSError } from "@/lib/agentos/adapter";
+import { MarketCatalog } from "@/lib/market/catalog";
+import { marketInfoForDemoSeeds } from "@/lib/demo/data";
+import { resetDemoPortfolio } from "@/lib/demo/portfolio";
+
+/** Deterministic offline demo catalog shared by the tests below. */
+function demoCatalog(): MarketCatalog {
+  return MarketCatalog.fromList(marketInfoForDemoSeeds());
+}
 
 describe("handleCommand (demo mode)", () => {
   it("prepares a PASS proposal for a healthy buy", async () => {
@@ -73,6 +81,10 @@ describe("handleCommand (demo mode)", () => {
 });
 
 describe("handleExecute", () => {
+  beforeEach(() => {
+    resetDemoPortfolio();
+  });
+
   it("refuses to execute without explicit approval", async () => {
     const out = await handleExecute({
       mode: "demo",
@@ -148,11 +160,11 @@ describe("handleExecute", () => {
     const out = await handleExecute({
       mode: "demo",
       scenario: "healthy",
-      symbol: "DOGEUSDT",
+      symbol: "XYZUSDT",
       side: "buy",
       amount: 20,
       quote: "USDT",
-      requestText: "Buy $20 of DOGEUSDT.",
+      requestText: "Buy $20 of XYZUSDT.",
       approve: true,
     });
     expect(out.ok).toBe(false);
@@ -227,6 +239,7 @@ describe("handleExecute with a dependency seam (C2)", () => {
   it("still reports a successful submission when post-processing fails", async () => {
     const out = await handleExecute(ctx, {
       adapter: healthyAdapter(),
+      catalog: demoCatalog(),
       afterExecutionStep: async () => {
         throw new Error("post-processing write failed");
       },
@@ -240,7 +253,7 @@ describe("handleExecute with a dependency seam (C2)", () => {
   });
 
   it("reports clean success when post-processing succeeds", async () => {
-    const out = await handleExecute(ctx, { adapter: healthyAdapter() });
+    const out = await handleExecute(ctx, { adapter: healthyAdapter(), catalog: demoCatalog() });
     expect(out.ok).toBe(true);
     if (out.ok) {
       expect(out.proposal.phase).toBe("SIMULATED");
@@ -255,7 +268,7 @@ describe("handleExecute with a dependency seam (C2)", () => {
         throw new AgentOSError("NETWORK", "Agent OS timed out.");
       },
     };
-    const out = await handleExecute(ctx, { adapter: failing });
+    const out = await handleExecute(ctx, { adapter: failing, catalog: demoCatalog() });
     expect(out.ok).toBe(false);
     if (!out.ok) {
       expect(out.blocked).toBe(false);

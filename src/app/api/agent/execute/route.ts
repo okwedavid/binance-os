@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleExecute } from "@/lib/orchestrator";
-import type { Side } from "@/lib/types";
+import type { AmountType, Side } from "@/lib/types";
 import { readStoredSession, sessionFingerprint } from "@/lib/agentos/binance/oauth";
 import { parseRequestedScenario, isCrossOriginRequest } from "@/lib/server-mode";
 import { authorizeExecution } from "@/lib/exec-authorization";
@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
   const side = parseSide(body);
   const symbol = parseSymbol(body);
   const amount = parseAmount(body);
+  const amountType = parseAmountType(body);
   const quote = "USDT";
   const requestText = parseText(body);
   const approve = parseApprove(body);
@@ -84,7 +85,7 @@ export async function POST(req: NextRequest) {
   const bind = requestedMode === "live" ? await sessionFingerprint() : "";
   const authorization = authorizeExecution({
     token,
-    order: { mode: requestedMode, symbol, side, amount, requestText },
+    order: { mode: requestedMode, symbol, side, amount, amountType, requestText },
     bind,
   });
   if (!authorization.ok) {
@@ -117,6 +118,7 @@ export async function POST(req: NextRequest) {
     symbol,
     side,
     amount,
+    amountType,
     quote,
     requestText,
     approve,
@@ -156,6 +158,19 @@ function parseSymbol(body: unknown): string | null {
     }
   }
   return null;
+}
+
+function parseAmountType(body: unknown): AmountType {
+  if (
+    body &&
+    typeof body === "object" &&
+    "amountType" in body &&
+    ((body as { amountType: unknown }).amountType === "base" ||
+      (body as { amountType: unknown }).amountType === "quote")
+  ) {
+    return (body as { amountType: AmountType }).amountType;
+  }
+  return "quote";
 }
 
 function parseAmount(body: unknown): number | null {

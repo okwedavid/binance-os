@@ -1,14 +1,16 @@
 import type {
   AccountEvidence,
+  AmountType,
   ConnectionState,
   ExecutionResult,
   MarketEvidence,
+  MarketInfo,
   Side,
 } from "@/lib/types";
 
 /**
  * AgentOSAdapter is the boundary between the RiskLens core and the
- * underlying Binance Agent OS capability layer.
+ * underlying capability layer.
  *
  * The rest of the application only knows this interface. It never knows
  * whether the implementation is the deterministic demo or the live
@@ -19,8 +21,19 @@ import type {
 export interface OrderRequest {
   symbol: string;
   side: Side;
+  /** Order size in quote units (after base→quote conversion). */
   amountQuote: number;
   quote: string;
+  /** Whether `amount` was expressed in base or quote units. */
+  amountType?: AmountType;
+  /** The amount exactly as the user requested (quote or base units). */
+  amount?: number;
+  /** Effective base quantity when derivable, otherwise null. */
+  baseQuantity?: number | null;
+  /** Resolved catalog pair (used by the demo simulator for filters). */
+  market?: MarketInfo | null;
+  /** Evidence snapshot already fetched by RiskLens (demo pricing). */
+  evidence?: MarketEvidence | null;
 }
 
 export interface AgentOSAdapter {

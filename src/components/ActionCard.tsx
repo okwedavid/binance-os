@@ -2,7 +2,7 @@
 
 import type { Proposal } from "@/lib/types";
 import { Panel, SafetyBadge, PhaseBadge, CheckGlyph, Button } from "@/components/ui";
-import { fmtUsd } from "@/lib/format";
+import { fmtUsd, fmtNum } from "@/lib/format";
 
 export function ActionCard({
   proposal,
@@ -32,6 +32,12 @@ export function ActionCard({
   const { safety, phase } = proposal;
   const blocked = safety.status === "BLOCK";
   const canExecute = !blocked && phase === "PROPOSED";
+  const order = proposal.order;
+  const requestedLabel = order
+    ? order.amountType === "base"
+      ? `${fmtNum(order.amount)} ${order.baseAsset}`
+      : `${fmtUsd(order.amount)} ${order.quoteAsset}`
+    : `${fmtUsd(proposal.amount)} ${proposal.quote}`;
 
   return (
     <Panel className="rl-fadein overflow-hidden">
@@ -47,10 +53,16 @@ export function ActionCard({
             {proposal.side.toUpperCase()}{" "}
             <span className="text-acc">{proposal.symbol}</span>
           </div>
-          <div className="font-mono text-lg text-muted">
-            {fmtUsd(proposal.amount)} {proposal.quote}
-          </div>
+          <div className="font-mono text-lg text-muted">{requestedLabel}</div>
         </div>
+        {order?.estimatedQuantity !== null && order?.estimatedQuantity !== undefined && (
+          <div className="mt-1 text-[12px] text-muted">
+            Est. {fmtNum(order.estimatedQuantity)} {order.baseAsset}
+            {order.marketPrice !== null && order.marketPrice !== undefined
+              ? ` @ ${fmtUsd(order.marketPrice)}`
+              : ""}
+          </div>
+        )}
         <div className="mt-3 flex items-center justify-between gap-3">
           <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
             Safety status

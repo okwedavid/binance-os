@@ -13,6 +13,7 @@ const order = {
   symbol: "BTCUSDT",
   side: "buy",
   amount: 20,
+  amountType: "quote" as const,
   requestText: "Buy $20 of BTCUSDT.",
 };
 
@@ -43,6 +44,14 @@ describe("execution authorization", () => {
   it("rejects a token presented for a different order", () => {
     const { token } = issueExecutionAuthorization({ order, bind: "" });
     const otherOrder = { ...order, amount: 200 };
+    const result = authorizeExecution({ token, order: otherOrder, bind: "" });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("tampered");
+  });
+
+  it("rejects a token whose amountType was changed", () => {
+    const { token } = issueExecutionAuthorization({ order, bind: "" });
+    const otherOrder = { ...order, amountType: "base" };
     const result = authorizeExecution({ token, order: otherOrder, bind: "" });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("tampered");

@@ -7,17 +7,22 @@ import type {
 import {
   buildDemoAccountEvidence,
   buildDemoMarketEvidence,
+  demoMarketForSymbol,
   getDemoAccount,
-  getDemoScenarioMarket,
   type DemoScenario,
 } from "@/lib/demo/data";
+import { getDemoPortfolio } from "@/lib/demo/portfolio";
+import { simulateDemoExecution } from "@/lib/demo/simulation";
 import type { AgentOSAdapter, OrderRequest } from "@/lib/agentos/adapter";
 import { AgentOSError } from "@/lib/agentos/adapter";
 
 /**
  * Deterministic demo adapter. Always works, always available, and never
- * reaches a live execution path. Every value it returns is labelled as a
- * demo sample so nothing is ever presented as a live result.
+ * reaches a live execution path. Evidence is generated for ANY catalog
+ * symbol (no hardcoded BTC/ETH fixture table); fills run through the full
+ * simulated trade lifecycle against the in-memory DEMO PORTFOLIO. Every
+ * value it returns is labelled as a demo sample so nothing is ever
+ * presented as a live result.
  */
 export class DemoAgentOSAdapter implements AgentOSAdapter {
   readonly kind = "demo" as const;
@@ -42,31 +47,54 @@ export class DemoAgentOSAdapter implements AgentOSAdapter {
   }
 
   async marketEvidence(symbol: string): Promise<MarketEvidence> {
-    const market = getDemoScenarioMarket(this.scenario, symbol);
-    if (!market) {
-      throw new AgentOSError("INVALID_REQUEST", `Demo Mode does not know the symbol ${symbol}.`);
+    if (!symbol || !/^[A-Z0-9]+$/.test(symbol)) {
+      throw new AgentOSError("INVALID_REQUEST", `Demo Mode cannot read the symbol ${symbol}.`);
     }
-    return buildDemoMarketEvidence(this.scenario, symbol, Date.now());
+    return buildDemoMarketEvidence(symbol, this.scenario, Date.now());
   }
 
   async accountEvidence(): Promise<AccountEvidence> {
-    return buildDemoAccountEvidence(this.scenario);
+    return buildDemoAccountEvidence(this.scenario, getDemoPortfolio());
   }
 
   async executeOrder(request: OrderRequest): Promise<ExecutionResult> {
-    const market = getDemoScenarioMarket(this.scenario, request.symbol);
-    if (!market) {
-      throw new AgentOSError("INVALID_REQUEST", `Demo Mode does not know the symbol ${request.symbol}.`);
+    if (!request.market) {
+      throw new AgentOSError(
+        "INVALID_REQUEST",
+        `Demo Mode does not know the pair ${request.symbol}.`
+      );
     }
-    const simulatedQuantity = request.amountQuote / market.price;
-    return {
-      ok: true,
-      simulated: true,
-      orderId: null,
-      message:
-        `SIMULATED ${request.side.toUpperCase()} ${request.symbol} for ${request.amountQuote.toFixed(2)} ${request.quote} ` +
-        `(~${simulatedQuantity.toFixed(6)} ${request.symbol.replace("USDT", "")}) at simulated price ${market.price.toFixed(2)}. ` +
-        "No live order was submitted.",
-    };
+    if (request.evidence === null || request.evidence === undefined) {
+      // Re-derive evidence so a demo fill never depends on client input.
+      const evidence = buildDemoMarketEvidence(request.symbol, this.scenario, Date.now());
+      return simulateDemoExecution({
+        symbol: request.symbol,
+        baseAsset: request.market.baseAsset,
+        quoteAsset: request.market.quoteAsset,
+        side: request.side,
+        quoteAmount: request.amountQuote,
+        baseQuantity: request.baseQuantity ?? null,
+        evidence,
+        market: request.market,
+        portfolio: getDemoPortfolio(),
+      });
+    }
+    return simulateDemoExecution({
+      symbol: request.symbol,
+      baseAsset: request.market.baseAsset,
+      quoteAsset: request.market.quoteAsset,
+      side: request.side,
+      quoteAmount: request.amountQuote,
+      baseQuantity: request.baseQuantity ?? null,
+      evidence: request.evidence,
+      market: request.market,
+      portfolio: getDemoPortfolio(),
+    });
+  }
+
+  /** Deterministic scenario market for a symbol (used by tests). */
+  referenceMarket(symbol: string): { price: number; bid: number; ask: number } {
+    const market = demoMarketForSymbol(symbol, this.scenario);
+    return { price: market.price, bid: market.bid, ask: market.ask };
   }
 }

@@ -76,6 +76,7 @@ export async function POST(req: NextRequest) {
       symbol: response.proposal.symbol,
       side: response.proposal.side,
       amount: response.proposal.amount,
+      amountType: response.proposal.order?.amountType ?? "quote",
       requestText: response.proposal.requestText,
     };
     executionAuthorization = issueExecutionAuthorization({ order, bind });

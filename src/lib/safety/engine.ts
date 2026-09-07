@@ -35,11 +35,26 @@ export interface SafetyEngineInput {
    * funds is a precondition of safety. Defaults to `false`.
    */
   balanceRequired?: boolean;
+  /**
+   * Additional deterministic checks (pair status, order filters, balances)
+   * produced by the shared order validation. Failures here are BLOCKs.
+   */
+  orderChecks?: SafetyCheckItem[];
 }
 
 export function evaluateSafety(input: SafetyEngineInput): SafetyResult {
   const checks: SafetyCheckItem[] = [];
   const reasons: string[] = [];
+
+  // Shared order-filter checks (pair status, step size, notional, balances).
+  if (input.orderChecks) {
+    for (const check of input.orderChecks) {
+      checks.push(check);
+      if (check.status === "fail") {
+        reasons.push(check.detail);
+      }
+    }
+  }
 
   const failed = (id: string, label: string, detail: string) => {
     checks.push({ id, label, status: "fail", detail });

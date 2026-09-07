@@ -31,6 +31,8 @@ export interface ExecutionAuthorizationPayload {
     symbol: string;
     side: string;
     amount: number;
+    /** Whether `amount` is quote units or base units. */
+    amountType: string;
     requestText: string;
   };
   /** Session fingerprint for live tokens; empty for demo tokens. */
@@ -77,6 +79,7 @@ function orderString(order: ExecutionAuthorizationPayload["order"]): string {
     symbol: order.symbol,
     side: order.side,
     amount: order.amount,
+    amountType: order.amountType,
     requestText: order.requestText,
   });
 }

@@ -6,11 +6,56 @@ export type OpKind = "analyze" | "propose" | "balance";
 
 export type Side = "buy" | "sell";
 
+export type AmountType = "quote" | "base";
+
 export type VolatilityLevel = "low" | "elevated" | "unknown";
 
 export type LiquidityLevel = "healthy" | "weak" | "unknown";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
+
+/**
+ * One Binance trading pair as resolved from Binance market/instrument
+ * metadata. RiskLens never hardcodes a supported-asset list: pairs come
+ * from the market catalog, which is built from Binance metadata.
+ */
+export interface MarketInfo {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  status: string;
+  baseAssetPrecision: number;
+  quoteAssetPrecision: number;
+  minQty: number | null;
+  maxQty: number | null;
+  stepSize: number | null;
+  minNotional: number | null;
+  tickSize: number | null;
+}
+
+/** Resolved order preview shown on the Action Card. */
+export interface OrderPreview {
+  baseAsset: string;
+  quoteAsset: string;
+  amountType: AmountType;
+  /** Amount exactly as the user requested (base or quote units). */
+  amount: number;
+  /** Amount in quote units used for risk/balance/notional checks. */
+  quoteAmount: number;
+  /** Estimated base quantity at the current market price. */
+  estimatedQuantity: number | null;
+  /** Market price used for the estimate. */
+  marketPrice: number | null;
+}
+
+/** In-memory demo portfolio snapshot. Never represents a live account. */
+export interface PortfolioSnapshot {
+  quoteAsset: string;
+  quoteBalance: number;
+  balances: Record<string, number>;
+  averageCosts: Record<string, number>;
+  realizedPnl: number;
+}
 
 export interface MarketEvidence {
   symbol: string;
@@ -42,6 +87,8 @@ export interface AccountEvidence {
   quoteBalance: number | null;
   permission: PermissionInfo | null;
   unavailable: string[];
+  /** Base-asset holdings indexed by base asset (demo portfolio only). */
+  holdings?: Record<string, number>;
 }
 
 export interface DerivedSignals {
@@ -90,22 +137,58 @@ export interface Proposal {
   safety: SafetyResult;
   phase: ProposalPhase;
   createdAtMs: number;
+  /** Generic order preview used by the Action Card. */
+  order?: OrderPreview | null;
+  /** Fill/result once executed (Demo simulated or Live Agent OS). */
+  result?: ExecutionResult | null;
+  /** DEMO PORTFOLIO snapshot after a simulated fill (Demo Mode only). */
+  portfolio?: PortfolioSnapshot | null;
 }
 
 export interface Intent {
   raw: string;
   op: OpKind | "unknown";
   side: Side | null;
+  /** Best-guess market token (base asset or full symbol) from the prompt. */
   symbol: string | null;
+  /** Amount exactly as the user requested. */
   amount: number | null;
+  /** Whether `amount` is quote units or base units. */
+  amountType: AmountType | null;
   quote: string;
 }
+
+export type ExecutionStatus = "SUBMITTED" | "FILLED" | "REJECTED" | "FAILED";
 
 export type ExecutionResult = {
   ok: boolean;
   simulated: boolean;
   orderId: string | null;
   message: string;
+  status?: ExecutionStatus;
+  side?: Side;
+  symbol?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  /** Requested order size in quote units. */
+  amount?: number;
+  /** Base quantity actually filled. */
+  filledQuantity?: number | null;
+  /** Effective execution price. */
+  executionPrice?: number | null;
+  fee?: number | null;
+  feeAsset?: string;
+  /** Simulated slippage applied (demo only) — always clearly identified. */
+  slippagePct?: number | null;
+  /** Honest provenance: "DEMO SIMULATION" or "BINANCE AGENT OS". */
+  sourceLabel?: "DEMO SIMULATION" | "BINANCE AGENT OS";
+  portfolio?: PortfolioSnapshot;
+  submittedAtMs?: number;
+  filledAtMs?: number;
+  /** Deterministic lifecycle steps (Demo simulation). */
+  steps?: Array<{ label: string; detail: string; atMs: number }>;
+  /** Realized P&L on a sell (Quote asset units; Demo simulation). */
+  realizedPnl?: number | null;
 };
 
 export type TimelineKind =

@@ -1,25 +1,33 @@
 import type {
   AgentResponse,
+  AmountType,
   DerivedSignals,
   EvidenceBundle,
+  ExecutionResult,
   Intent,
+  MarketInfo,
   Mode,
+  OrderPreview,
+  PortfolioSnapshot,
   Proposal,
+  SafetyCheckItem,
   SafetyResult,
+  Side,
   TimelineEvent,
   TimelineKind,
-  ExecutionResult,
 } from "@/lib/types";
 import { parseIntent, requiredForOp, clarifyQuestion, supportNotes } from "@/lib/agent/intent";
 import { evaluateSafety, formatAmount } from "@/lib/safety/engine";
+import { checkPairStatus, validateOrder, roundToStep } from "@/lib/market/validate";
+import { createMarketCatalog, type MarketCatalog } from "@/lib/market/catalog";
 import { explainDecision, decisionSummary } from "@/lib/agent/explain";
 import { getAdapter } from "@/lib/agentos";
 import { userMessageForError, type AgentOSAdapter } from "@/lib/agentos/adapter";
 import { deriveSignalsFromMarket } from "@/lib/demo/data";
 import type { DemoScenario } from "@/lib/demo/data";
-import { normalizeSymbol } from "@/lib/demo/data";
 
 export const FRESHNESS_TARGET_SECONDS = 30;
+export const DEFAULT_QUOTE_ASSET = "USDT";
 
 export interface CommandContext {
   mode: Mode;
@@ -31,8 +39,10 @@ export interface ExecuteContext {
   mode: Mode;
   scenario: DemoScenario;
   symbol: string;
-  side: "buy" | "sell";
+  side: Side;
+  /** Amount exactly as the user requested (quote or base units). */
   amount: number;
+  amountType?: AmountType;
   quote: string;
   requestText: string;
   approve: boolean;
@@ -40,12 +50,14 @@ export interface ExecuteContext {
 
 /**
  * Dependency seam for handleExecute. Real callers pass nothing; tests
- * inject a fake adapter / a hook that runs after a successful order
- * submission so the "success + late failure" path can be verified.
+ * inject a fake adapter, a post-execution hook, and/or a market catalog
+ * so Live-mode execution checks stay hermetic.
  */
 export interface ExecuteDeps {
   adapter?: AgentOSAdapter | null;
   afterExecutionStep?: (result: ExecutionResult) => Promise<void> | void;
+  /** Market catalog to resolve the pair against (tests only). */
+  catalog?: MarketCatalog;
 }
 
 export type ExecuteOutcome =
@@ -55,6 +67,19 @@ export type ExecuteOutcome =
 function event(kind: TimelineKind, label: string, detail: string): TimelineEvent {
   return { id: crypto.randomUUID(), kind, label, detail, atMs: Date.now() };
 }
+
+// ---------------------------------------------------------------------------
+// Shared symbol resolution
+// ---------------------------------------------------------------------------
+
+async function resolveMarket(mode: Mode, token: string): Promise<MarketInfo | null> {
+  const catalog = await createMarketCatalog(mode);
+  return catalog.resolve(token, DEFAULT_QUOTE_ASSET);
+}
+
+// ---------------------------------------------------------------------------
+// Shared evidence + risk
+// ---------------------------------------------------------------------------
 
 async function buildEvidence(
   mode: Mode,
@@ -91,15 +116,57 @@ async function buildEvidence(
   return { market, account, derived };
 }
 
+interface Amounts {
+  quoteAmount: number;
+  baseQuantity: number | null;
+  marketPrice: number | null;
+}
+
+function deriveAmounts(
+  amountType: AmountType,
+  amount: number,
+  market: MarketInfo,
+  evidence: EvidenceBundle
+): Amounts | null {
+  const price = evidence.market.lastPrice;
+  if (amountType === "base") {
+    if (price === null || !Number.isFinite(price) || price <= 0) return null;
+    const step = market.stepSize && market.stepSize > 0 ? market.stepSize : 1e-8;
+    const baseQuantity = roundToStep(amount, step);
+    return { quoteAmount: baseQuantity * price, baseQuantity, marketPrice: price };
+  }
+  const step = market.stepSize && market.stepSize > 0 ? market.stepSize : 1e-8;
+  const baseQuantity = price !== null && price > 0 ? roundToStep(amount / price, step) : null;
+  return { quoteAmount: amount, baseQuantity, marketPrice: price };
+}
+
 function safetyFor(
   intent: Intent,
   evidence: EvidenceBundle,
   op: "analyze" | "propose",
-  mode: Mode
+  mode: Mode,
+  market: MarketInfo,
+  amounts: Amounts | null
 ): SafetyResult {
   const propose = op === "propose";
+  const orderChecks: SafetyCheckItem[] = [checkPairStatus(market)];
+  if (propose && amounts) {
+    orderChecks.push(
+      ...validateOrder({
+        market,
+        side: intent.side ?? "buy",
+        quoteAmount: amounts.quoteAmount,
+        baseQuantity: amounts.baseQuantity,
+        quoteBalance: evidence.account.quoteBalance,
+        baseHoldings:
+          intent.side === "sell"
+            ? (evidence.account.holdings?.[market.baseAsset] ?? null)
+            : null,
+      })
+    );
+  }
   return evaluateSafety({
-    amount: propose ? intent.amount : null,
+    amount: propose && amounts ? amounts.quoteAmount : null,
     marketDataAgeSeconds: evidence.market.ageSeconds,
     freshnessTargetSeconds: FRESHNESS_TARGET_SECONDS,
     volatility: evidence.derived.volatility,
@@ -108,11 +175,14 @@ function safetyFor(
     balanceQuote: evidence.account.quoteBalance,
     permissionGranted: propose ? (evidence.account.permission?.granted ?? null) : null,
     permissionRequired: propose,
-    // A live execution must have real funds confirmed; a demo proposal is
-    // a deterministic simulation and does not need it.
     balanceRequired: propose && mode === "live",
+    orderChecks,
   });
 }
+
+// ---------------------------------------------------------------------------
+// handleCommand
+// ---------------------------------------------------------------------------
 
 export async function handleCommand(ctx: CommandContext): Promise<AgentResponse> {
   try {
@@ -136,7 +206,7 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
         timeline: [event("SYSTEM", "Clarification", "Missing market symbol.")],
       };
     }
-    if (required.amount && intent.amount === null) {
+    if (required.amount && (intent.amount === null || intent.amountType === null)) {
       return {
         ok: true,
         kind: "clarify",
@@ -145,9 +215,23 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
       };
     }
 
+    if (required.symbol && intent.symbol) {
+      const market = await resolveMarket(ctx.mode, intent.symbol);
+      if (!market) {
+        return {
+          ok: false,
+          message: "RiskLens could not verify this Binance trading pair.",
+          detail: `The requested market "${intent.symbol}" is not listed as a trading pair on the Binance spot catalog. RiskLens never fabricates a market.`,
+          timeline: [event("BLOCKED", "Action blocked", `Unverifiable trading pair: ${intent.symbol}.`)],
+        };
+      }
+      intent.symbol = market.symbol;
+    }
+
     if (intent.op === "analyze" && intent.symbol) {
       const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "analyze");
-      const safety = safetyFor(intent, evidence, "analyze", ctx.mode);
+      const market = (await resolveMarket(ctx.mode, intent.symbol)) ?? emptyMarket(intent.symbol);
+      const safety = safetyFor(intent, evidence, "analyze", ctx.mode, market, null);
       const message = explainDecision(intent, evidence.market, evidence.account, evidence.derived, safety);
       return {
         ok: true,
@@ -166,8 +250,20 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
 
     if (intent.op === "propose" && intent.symbol && intent.amount !== null && intent.side) {
       const evidence = await buildEvidence(ctx.mode, ctx.scenario, intent.symbol, "propose");
-      const safety = safetyFor(intent, evidence, "propose", ctx.mode);
-      const proposal = buildProposal(ctx.mode, intent, evidence, safety);
+      const market = (await resolveMarket(ctx.mode, intent.symbol)) ?? emptyMarket(intent.symbol);
+      const amountType = intent.amountType ?? "quote";
+      const amounts = deriveAmounts(amountType, intent.amount, market, evidence);
+      if (!amounts) {
+        return {
+          ok: false,
+          message: "RiskLens could not verify the order value.",
+          detail:
+            "A current market price is required to convert a base quantity into an order value, and the evidence did not include one. Nothing was proposed.",
+          timeline: [event("BLOCKED", "Action blocked", "Could not derive an order value from the evidence.")],
+        };
+      }
+      const safety = safetyFor(intent, evidence, "propose", ctx.mode, market, amounts);
+      const proposal = buildProposal(ctx.mode, intent, evidence, safety, market, amounts, null);
       const quote = evidence.market.lastPrice;
       const message =
         quote !== null
@@ -183,7 +279,7 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
           event("ANALYSIS", `${intent.symbol} market check completed`, `Market data age: ${formatAgeText(evidence.market.ageSeconds)}.`),
           event(
             "PROPOSAL",
-            `${formatAmount(intent.amount)} ${intent.side.toUpperCase()} ${intent.symbol} prepared`,
+            `${formatAmount(amounts.quoteAmount)} ${intent.side.toUpperCase()} ${intent.symbol} prepared`,
             `Safety: ${safety.status}. Approval required before execution.`
           ),
         ],
@@ -197,7 +293,9 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
         account.available && account.quoteBalance !== null
           ? `Available balance: ${formatAmount(account.quoteBalance)} USDT.`
           : "Balance unavailable from the current Agent OS permission.";
-      const sample = account.sample ? "\n(Simulated demo balance — no live account was queried.)" : "";
+      const sample = account.sample
+        ? "\n(DEMO PORTFOLIO — a deterministic simulation. No live account was queried.)"
+        : "";
       return {
         ok: true,
         kind: "response",
@@ -222,6 +320,10 @@ export async function handleCommand(ctx: CommandContext): Promise<AgentResponse>
   }
 }
 
+// ---------------------------------------------------------------------------
+// handleExecute
+// ---------------------------------------------------------------------------
+
 export async function handleExecute(
   ctx: ExecuteContext,
   deps: ExecuteDeps = {}
@@ -236,17 +338,6 @@ export async function handleExecute(
     };
   }
 
-  const symbol = normalizeSymbol(ctx.symbol);
-  if (!symbol) {
-    return {
-      ok: false,
-      blocked: true,
-      safety: null,
-      message: "That market is not supported by RiskLens.",
-      timeline: [event("BLOCKED", "Action blocked", "Unsupported market.")],
-    };
-  }
-
   if (!Number.isFinite(ctx.amount) || ctx.amount <= 0) {
     return {
       ok: false,
@@ -258,18 +349,47 @@ export async function handleExecute(
   }
 
   try {
-    // Re-verify on the server with FRESH evidence. The client may never
-    // dictate the safety decision or the execution path.
+    // Re-verify the pair against the server-side catalog. The client can
+    // never dictate the execution path.
+    const catalog = deps.catalog ?? (await createMarketCatalog(ctx.mode));
+    const market = catalog.resolve(ctx.symbol, DEFAULT_QUOTE_ASSET);
+    if (!market) {
+      return {
+        ok: false,
+        blocked: true,
+        safety: null,
+        message: "RiskLens could not verify this Binance trading pair.",
+        detail: `The market ${ctx.symbol} is not in the Binance spot catalog. Nothing was executed.`,
+        timeline: [event("BLOCKED", "Action blocked", "Unverifiable Binance trading pair.")],
+      };
+    }
+    const symbol = market.symbol;
+
+    // Re-verify on the server with FRESH evidence.
     const evidence = await buildEvidence(ctx.mode, ctx.scenario, symbol, "propose", deps.adapter ?? undefined);
+    const amountType = ctx.amountType ?? "quote";
+    const amounts = deriveAmounts(amountType, ctx.amount, market, evidence);
+    if (!amounts) {
+      return {
+        ok: false,
+        blocked: true,
+        safety: null,
+        message: "RiskLens could not verify the order value from fresh evidence.",
+        detail: "A current market price is required, or the evidence was unavailable. Nothing was executed.",
+        timeline: [event("BLOCKED", "Action blocked", "Could not derive an order value from fresh evidence.")],
+      };
+    }
+
     const intent: Intent = {
       raw: ctx.requestText,
       op: "propose",
       side: ctx.side,
       symbol,
       amount: ctx.amount,
+      amountType,
       quote: ctx.quote,
     };
-    const safety = safetyFor(intent, evidence, "propose", ctx.mode);
+    const safety = safetyFor(intent, evidence, "propose", ctx.mode, market, amounts);
 
     if (safety.status === "BLOCK") {
       const why = explainDecision(intent, evidence.market, evidence.account, evidence.derived, safety);
@@ -289,8 +409,13 @@ export async function handleExecute(
       result = await adapter.executeOrder({
         symbol,
         side: ctx.side,
-        amountQuote: ctx.amount,
+        amountQuote: amounts.quoteAmount,
         quote: ctx.quote,
+        amountType,
+        amount: ctx.amount,
+        baseQuantity: amounts.baseQuantity,
+        market,
+        evidence: evidence.market,
       });
     } catch (err) {
       const { message, detail } = userMessageForError(err);
@@ -304,12 +429,9 @@ export async function handleExecute(
       };
     }
 
-    // Post-processing (proposal building, hooks) must NEVER change the
-    // fact that an order was already submitted. If it fails, the outcome
-    // still reports the submission honestly, flagged as unconfirmed.
     let proposal: Proposal;
     try {
-      proposal = buildProposal(ctx.mode, intent, evidence, safety, result);
+      proposal = buildProposal(ctx.mode, intent, evidence, safety, market, amounts, result);
     } catch {
       proposal = {
         id: crypto.randomUUID(),
@@ -317,13 +439,14 @@ export async function handleExecute(
         op: "propose",
         side: ctx.side,
         symbol,
-        amount: ctx.amount,
+        amount: amounts.quoteAmount,
         quote: ctx.quote,
         requestText: ctx.requestText,
         evidence,
         safety,
         phase: result.simulated ? "SIMULATED" : "EXECUTED",
         createdAtMs: Date.now(),
+        result,
       };
     }
 
@@ -336,23 +459,7 @@ export async function handleExecute(
       }
     }
 
-    const kind: TimelineKind = result.simulated ? "SIMULATED" : "EXECUTED";
-    const label = result.simulated
-      ? "Simulated execution"
-      : "Order submitted through Agent OS";
-    const timeline: TimelineEvent[] = [
-      event("APPROVED", "User approved action", `Approved ${ctx.side.toUpperCase()} ${formatAmount(ctx.amount)} ${symbol}.`),
-      event(kind, label, result.message),
-    ];
-    if (postError !== null) {
-      timeline.push(
-        event(
-          "SYSTEM",
-          "Confirmation pending",
-          "The order was submitted, but the final confirmation could not be recorded."
-        )
-      );
-    }
+    const timeline = buildExecutionTimeline(ctx, symbol, amounts.quoteAmount, result, postError);
 
     return {
       ok: true,
@@ -374,12 +481,49 @@ export async function handleExecute(
   }
 }
 
+function buildExecutionTimeline(
+  ctx: ExecuteContext,
+  symbol: string,
+  quoteAmount: number,
+  result: ExecutionResult,
+  postError: unknown
+): TimelineEvent[] {
+  const timeline: TimelineEvent[] = [
+    event("APPROVED", "User approved action", `Approved ${ctx.side.toUpperCase()} ${formatAmount(quoteAmount)} ${symbol}.`),
+  ];
+  if (result.steps && result.steps.length > 0) {
+    for (const step of result.steps) {
+      timeline.push(event(sideKind(result), step.label, step.detail));
+    }
+  } else if (result.simulated) {
+    timeline.push(event("SIMULATED", "Simulated execution", result.message));
+  } else {
+    timeline.push(event("EXECUTED", "Order submitted through Agent OS", result.message));
+  }
+  if (postError !== null) {
+    timeline.push(
+      event(
+        "SYSTEM",
+        "Confirmation pending",
+        "The order was submitted, but the final confirmation could not be recorded."
+      )
+    );
+  }
+  return timeline;
+}
+
+function sideKind(result: ExecutionResult): TimelineKind {
+  return result.simulated ? "SIMULATED" : "EXECUTED";
+}
+
 function buildProposal(
   mode: Mode,
   intent: Intent,
   evidence: EvidenceBundle,
   safety: SafetyResult,
-  result?: ExecutionResult
+  market: MarketInfo,
+  amounts: Amounts,
+  result: ExecutionResult | null
 ): Proposal {
   const phase: Proposal["phase"] = result
     ? result.simulated
@@ -388,19 +532,51 @@ function buildProposal(
     : safety.status === "BLOCK"
       ? "BLOCKED"
       : "PROPOSED";
+  const amountType = intent.amountType ?? "quote";
+  const order: OrderPreview = {
+    baseAsset: market.baseAsset,
+    quoteAsset: market.quoteAsset,
+    amountType,
+    amount: amountType === "base" ? (intent.amount ?? amounts.baseQuantity ?? 0) : intent.amount ?? amounts.quoteAmount,
+    quoteAmount: amounts.quoteAmount,
+    estimatedQuantity: amounts.baseQuantity,
+    marketPrice: amounts.marketPrice,
+  };
+
+  const portfolio: PortfolioSnapshot | null = result?.portfolio ?? null;
+
   return {
     id: crypto.randomUUID(),
     mode,
     op: "propose",
     side: intent.side ?? "buy",
-    symbol: intent.symbol ?? "BTCUSDT",
-    amount: intent.amount ?? 0,
-    quote: intent.quote,
+    symbol: market.symbol,
+    amount: amounts.quoteAmount,
+    quote: market.quoteAsset,
     requestText: intent.raw,
     evidence,
     safety,
     phase,
     createdAtMs: Date.now(),
+    order,
+    portfolio,
+    result: result ?? null,
+  };
+}
+
+function emptyMarket(symbol: string): MarketInfo {
+  return {
+    symbol,
+    baseAsset: symbol.replace(/USDT$/, ""),
+    quoteAsset: "USDT",
+    status: "UNKNOWN",
+    baseAssetPrecision: 8,
+    quoteAssetPrecision: 8,
+    minQty: null,
+    maxQty: null,
+    stepSize: null,
+    minNotional: null,
+    tickSize: null,
   };
 }
 

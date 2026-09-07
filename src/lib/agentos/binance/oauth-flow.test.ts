@@ -404,6 +404,7 @@ describe("demo/live separation and execution guards", () => {
       symbol: "BTCUSDT",
       side: "buy",
       amount: 20,
+      amountType: "quote",
       requestText: "Buy $20 of BTCUSDT.",
     };
     const { token } = issueExecutionAuthorization({ order, bind: "session-fp" });
@@ -419,6 +420,7 @@ describe("demo/live separation and execution guards", () => {
       symbol: "BTCUSDT",
       side: "buy",
       amount: 20,
+      amountType: "quote",
       requestText: "Buy $20 of BTCUSDT.",
     };
     const { token } = issueExecutionAuthorization({ order, bind: "session-a" });

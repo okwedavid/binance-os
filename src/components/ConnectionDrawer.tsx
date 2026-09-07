@@ -41,6 +41,7 @@ export function ConnectionDrawer({
   onConnect,
   connecting,
   onDisconnect,
+  onResetDemo,
 }: {
   open: boolean;
   onClose: () => void;
@@ -55,6 +56,7 @@ export function ConnectionDrawer({
   onConnect: () => void;
   connecting: boolean;
   onDisconnect: () => void;
+  onResetDemo?: () => void;
 }) {
   // Honest three-way button state. `authReady` reflects the server-reported
   // OAuth capability of THIS deployment — never assumed from client-side
@@ -155,6 +157,15 @@ export function ConnectionDrawer({
                   </button>
                 ))}
               </div>
+              {onResetDemo && (
+                <Button
+                  variant="secondary"
+                  onClick={onResetDemo}
+                  className="mt-3 w-full"
+                >
+                  Reset Demo Portfolio
+                </Button>
+              )}
             </section>
           )}
 

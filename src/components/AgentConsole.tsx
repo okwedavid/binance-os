@@ -16,6 +16,8 @@ import { ActionCard } from "@/components/ActionCard";
 import { EvidencePanel } from "@/components/EvidencePanel";
 import { ActivityTimeline } from "@/components/ActivityTimeline";
 import { ConnectionDrawer } from "@/components/ConnectionDrawer";
+import { TradingResult } from "@/components/TradingResult";
+import { DemoPortfolioPanel } from "@/components/DemoPortfolioPanel";
 import { StatusDot } from "@/components/ui";
 
 type ConsoleMessage =
@@ -63,6 +65,9 @@ export function AgentConsole() {
   const [connecting, setConnecting] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Bumped after each successful execution so the Demo portfolio panel
+  // re-reads the in-memory ledger.
+  const [portfolioKey, setPortfolioKey] = useState(0);
   const consoleRef = useRef<HTMLDivElement>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -226,6 +231,7 @@ export function AgentConsole() {
           symbol: proposal.symbol,
           side: proposal.side,
           amount: proposal.amount,
+          amountType: proposal.order?.amountType ?? "quote",
           quote: proposal.quote,
           requestText: proposal.requestText,
           approve: true,
@@ -237,6 +243,7 @@ export function AgentConsole() {
       if (data.ok && data.proposal) {
         setProposal(data.proposal);
         setExecAuth(null);
+        setPortfolioKey((k) => k + 1);
         setMessages((prev) => [
           ...prev,
           { role: "agent", id: uid(), text: data.message, tone: "default" },
@@ -288,6 +295,27 @@ export function AgentConsole() {
         atMs: Date.now(),
       },
     ]);
+  }
+
+  async function resetDemo() {
+    try {
+      const res = await fetch("/api/demo/reset", { method: "POST" });
+      const data = (await res.json()) as { ok: boolean };
+      if (data.ok) {
+        setPortfolioKey((k) => k + 1);
+        appendEvents([
+          {
+            id: uid(),
+            kind: "SYSTEM",
+            label: "Demo portfolio reset",
+            detail: "The in-memory DEMO PORTFOLIO returned to 10,000 USDT. No live account was touched.",
+            atMs: Date.now(),
+          },
+        ]);
+      }
+    } catch {
+      // best-effort
+    }
   }
 
   async function connect() {
@@ -519,6 +547,8 @@ export function AgentConsole() {
               onApprove={approve}
               onCancel={cancel}
             />
+            {proposal?.result ? <TradingResult result={proposal.result} /> : null}
+            {mode === "demo" ? <DemoPortfolioPanel refreshKey={portfolioKey} /> : null}
             <EvidencePanel evidence={evidence} />
             <ActivityTimeline events={events} />
           </aside>
@@ -586,6 +616,7 @@ export function AgentConsole() {
         onConnect={connect}
         connecting={connecting}
         onDisconnect={disconnect}
+        onResetDemo={resetDemo}
       />
     </div>
   );
