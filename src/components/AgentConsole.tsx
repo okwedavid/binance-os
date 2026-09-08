@@ -461,10 +461,10 @@ export function AgentConsole() {
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-5 sm:px-6">
         <div className="grid gap-5 lg:grid-cols-[1fr_400px]">
-          <section className="flex min-h-[420px] flex-col">
+          <section className="flex min-h-[420px] flex-col lg:sticky lg:top-5 lg:self-start">
             <div
               ref={consoleRef}
-              className="flex-1 space-y-4 overflow-y-auto rounded-xl border border-line bg-panel p-4 lg:max-h-[60vh] lg:min-h-[380px]"
+              className="flex-1 space-y-4 overflow-y-auto rounded-xl border border-line bg-panel p-4 lg:h-[calc(100vh-4.5rem)] lg:min-h-[540px]"
             >
               {messages.map((m) =>
                 m.role === "user" ? (
