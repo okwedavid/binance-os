@@ -206,6 +206,9 @@ export async function GET() {
 function parseExecutionToken(body: unknown): string {
   if (body && typeof body === "object" && "executionAuthorization" in body) {
     const auth = (body as { executionAuthorization: unknown }).executionAuthorization;
+    // The client sends the token as a bare string. Accept that directly,
+    // and also tolerate the object form ({ token }) for robustness.
+    if (typeof auth === "string") return auth.slice(0, 4096);
     if (auth && typeof auth === "object" && "token" in auth) {
       const t = (auth as { token: unknown }).token;
       if (typeof t === "string") return t.slice(0, 4096);
