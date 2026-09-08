@@ -548,7 +548,9 @@ export function AgentConsole() {
               onCancel={cancel}
             />
             {proposal?.result ? <TradingResult result={proposal.result} /> : null}
-            {mode === "demo" ? <DemoPortfolioPanel refreshKey={portfolioKey} /> : null}
+            {mode === "demo" ? (
+              <DemoPortfolioPanel refreshKey={portfolioKey} snapshot={proposal?.portfolio} />
+            ) : null}
             <EvidencePanel evidence={evidence} />
             <ActivityTimeline events={events} />
           </aside>

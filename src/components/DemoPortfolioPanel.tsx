@@ -15,19 +15,35 @@ interface PortfolioResponse {
  * In-memory DEMO PORTFOLIO panel. Only rendered in Demo Mode. Every number
  * is clearly labeled as a simulation; this ledger never represents a live
  * Binance account and is never persisted.
+ *
+ * The panel prefers the portfolio snapshot returned by the execution result
+ * (`snapshot`), because the exec response is authoritative for that fill.
+ * On a multi-instance deployment the shared `/api/demo/portfolio` read can
+ * land on a different instance and show stale state, so the passed snapshot
+ * keeps the displayed portfolio consistent with the simulated fill. When no
+ * snapshot is available it falls back to the shared API read.
  */
-export function DemoPortfolioPanel({ refreshKey }: { refreshKey: number }) {
-  const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
+export function DemoPortfolioPanel({
+  refreshKey,
+  snapshot,
+}: {
+  refreshKey: number;
+  snapshot?: PortfolioSnapshot | null;
+}) {
+  const [fetched, setFetched] = useState<PortfolioSnapshot | null>(null);
   const [label, setLabel] = useState("DEMO PORTFOLIO");
   const [busy, setBusy] = useState(false);
 
+  const portfolio = snapshot ?? fetched;
+
   useEffect(() => {
+    if (snapshot) return;
     let active = true;
     fetch("/api/demo/portfolio")
       .then((res) => res.json() as Promise<PortfolioResponse>)
       .then((data) => {
         if (active && data.ok) {
-          setPortfolio(data.portfolio);
+          setFetched(data.portfolio);
           setLabel(data.label);
         }
       })
@@ -37,7 +53,7 @@ export function DemoPortfolioPanel({ refreshKey }: { refreshKey: number }) {
     return () => {
       active = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, snapshot]);
 
   async function reset() {
     if (busy) return;
@@ -46,7 +62,7 @@ export function DemoPortfolioPanel({ refreshKey }: { refreshKey: number }) {
       const res = await fetch("/api/demo/reset", { method: "POST" });
       const data = (await res.json()) as PortfolioResponse;
       if (data.ok) {
-        setPortfolio(data.portfolio);
+        setFetched(data.portfolio);
         setLabel(data.label);
       }
     } catch {
