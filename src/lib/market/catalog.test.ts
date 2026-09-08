@@ -36,6 +36,21 @@ describe("demo market catalog (deterministic, offline)", () => {
     expect(catalog.resolve("WIDGET", "USDT")).toBeNull();
   });
 
+  it("resolves any listed Binance pair, not just the demo seeds", async () => {
+    // Regression: analysis must cover every coin listed and tradeable on
+    // Binance. A full binance exchangeInfo catalog resolves non-major
+    // symbols (LINK, SUI, ZEC) that are absent from the offline demo seed.
+    const catalog = MarketCatalog.fromExchangeInfoSymbols([
+      { symbol: "BTCUSDT", baseAsset: "BTC", quoteAsset: "USDT", status: "TRADING", baseAssetPrecision: 8, quoteAssetPrecision: 8 },
+      { symbol: "LINKUSDT", baseAsset: "LINK", quoteAsset: "USDT", status: "TRADING", baseAssetPrecision: 8, quoteAssetPrecision: 8 },
+      { symbol: "SUIUSDT", baseAsset: "SUI", quoteAsset: "USDT", status: "TRADING", baseAssetPrecision: 8, quoteAssetPrecision: 8 },
+      { symbol: "ZECUSDT", baseAsset: "ZEC", quoteAsset: "USDT", status: "TRADING", baseAssetPrecision: 8, quoteAssetPrecision: 8 },
+    ]);
+    expect(catalog.resolve("LINK", "USDT")?.symbol).toBe("LINKUSDT");
+    expect(catalog.resolve("SUI", "USDT")?.symbol).toBe("SUIUSDT");
+    expect(catalog.resolve("ZECUSDT", "USDT")?.symbol).toBe("ZECUSDT");
+  });
+
   it("resolves base assets to the default quote pair", async () => {
     const catalog = await createMarketCatalog("demo");
     expect(catalog.resolveBase("SOL")?.symbol).toBe("SOLUSDT");

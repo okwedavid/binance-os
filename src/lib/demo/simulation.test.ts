@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { simulateDemoExecution } from "./simulation";
-import { buildDemoMarketEvidence } from "./data";
+import { buildDemoMarketEvidence, demoMarketForSymbol } from "./data";
 import { marketInfoForDemoSeeds } from "./data";
 import { baseHolding, getDemoPortfolio, resetDemoPortfolio } from "./portfolio";
 
@@ -132,5 +132,21 @@ describe("deterministic demo execution lifecycle", () => {
     // ask * (1 + `RL_DEMO_*` or default 0.0005). Deterministic by construction.
     const expected = ask * 1.0005;
     expect(result.executionPrice).toBeCloseTo(expected, 8);
+  });
+
+  it("derives deterministic evidence for any listed Binance symbol, not just the seeds", () => {
+    // Regression: analysis must cover every coin listed on Binance, even
+    // those absent from the offline demo seed (e.g. SUI).
+    for (const symbol of ["SUIUSDT", "LINKUSDT", "ZECUSDT"]) {
+      const market = demoMarketForSymbol(symbol, "healthy");
+      expect(market.price).toBeGreaterThan(0);
+      expect(market.bid).toBeGreaterThan(0);
+      expect(market.ask).toBeGreaterThan(0);
+      expect(market.quoteVolume24h).toBeGreaterThan(0);
+
+      const fallback = demoMarketForSymbol(symbol, "healthy");
+      // Stable and deterministic: repeated calls yield the same reference price.
+      expect(fallback.price).toBe(market.price);
+    }
   });
 });

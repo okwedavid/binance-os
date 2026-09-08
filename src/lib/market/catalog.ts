@@ -149,17 +149,24 @@ async function publicCatalogCached(): Promise<MarketCatalog | null> {
 /**
  * Builds the authoritative catalog for a mode.
  *
- * Demo: the deterministic offline seed only — reproducible and network-free.
- * Live: strictly the real Binance instrument metadata. When the public
- * endpoint is unreachable, Live fails closed with an empty catalog so a
- * symbol can never silently pass as "verified" on guessed metadata.
+ * Both Demo and Live resolve pairs against the real Binance instrument
+ * metadata, so every coin currently listed and tradeable on Binance is
+ * available in both modes. Demo order values remain deterministic
+ * simulations (see `demoMarketForSymbol`), but the set of valid pairs is
+ * the live listing.
+ *
+ * When the public endpoint is unreachable the mode falls back:
+ * - Live fails closed with an empty catalog so a symbol can never silently
+ *   pass as "verified" on guessed metadata.
+ * - Demo falls back to the deterministic offline seed (well-known majors)
+ *   so the rehearsal environment stays usable and reproducible offline.
  */
 export async function createMarketCatalog(mode: Mode): Promise<MarketCatalog> {
-  if (mode === "live") {
-    const live = await publicCatalogCached();
-    return live ?? MarketCatalog.fromList([]);
-  }
-  return MarketCatalog.fromList(DEMO_SEED_SYMBOLS);
+  const live = await publicCatalogCached();
+  if (live) return live;
+  return mode === "live"
+    ? MarketCatalog.fromList([])
+    : MarketCatalog.fromList(DEMO_SEED_SYMBOLS);
 }
 
 function exchangeInfoToMarketInfo(raw: BinanceExchangeInfoSymbol): MarketInfo {
