@@ -3,6 +3,7 @@ import { simulateDemoExecution } from "./simulation";
 import { buildDemoMarketEvidence, demoMarketForSymbol } from "./data";
 import { marketInfoForDemoSeeds } from "./data";
 import { baseHolding, getDemoPortfolio, resetDemoPortfolio } from "./portfolio";
+import { DemoAgentOSAdapter } from "@/lib/agentos/demo-adapter";
 
 describe("deterministic demo execution lifecycle", () => {
   beforeEach(() => {
@@ -148,5 +149,33 @@ describe("deterministic demo execution lifecycle", () => {
       // Stable and deterministic: repeated calls yield the same reference price.
       expect(fallback.price).toBe(market.price);
     }
+  });
+});
+
+describe("demo adapter commits simulated fills to the shared ledger", () => {
+  beforeEach(() => {
+    resetDemoPortfolio();
+  });
+
+  it("persists the fill to the process store so /api/demo/portfolio updates", async () => {
+    const adapter = new DemoAgentOSAdapter("healthy");
+    const result = await adapter.executeOrder({
+      symbol: "SOLUSDT",
+      side: "buy",
+      amountQuote: 100,
+      quote: "USDT",
+      amountType: "quote",
+      amount: 100,
+      baseQuantity: null,
+      market: marketInfoForDemoSeeds().find((m) => m.symbol === "SOLUSDT")!,
+      evidence: buildDemoMarketEvidence("SOLUSDT", "healthy", Date.now()),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("FILLED");
+
+    const store = getDemoPortfolio();
+    expect(store.quoteBalance).toBeLessThan(10_000);
+    expect(baseHolding(store, "SOL")).toBe(result.filledQuantity);
   });
 });

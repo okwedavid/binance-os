@@ -11,7 +11,7 @@ import {
   getDemoAccount,
   type DemoScenario,
 } from "@/lib/demo/data";
-import { getDemoPortfolio } from "@/lib/demo/portfolio";
+import { getDemoPortfolio, mutatePortfolio } from "@/lib/demo/portfolio";
 import { simulateDemoExecution } from "@/lib/demo/simulation";
 import type { AgentOSAdapter, OrderRequest } from "@/lib/agentos/adapter";
 import { AgentOSError } from "@/lib/agentos/adapter";
@@ -64,32 +64,29 @@ export class DemoAgentOSAdapter implements AgentOSAdapter {
         `Demo Mode does not know the pair ${request.symbol}.`
       );
     }
-    if (request.evidence === null || request.evidence === undefined) {
-      // Re-derive evidence so a demo fill never depends on client input.
-      const evidence = buildDemoMarketEvidence(request.symbol, this.scenario, Date.now());
-      return simulateDemoExecution({
-        symbol: request.symbol,
-        baseAsset: request.market.baseAsset,
-        quoteAsset: request.market.quoteAsset,
-        side: request.side,
-        quoteAmount: request.amountQuote,
-        baseQuantity: request.baseQuantity ?? null,
-        evidence,
-        market: request.market,
-        portfolio: getDemoPortfolio(),
-      });
-    }
-    return simulateDemoExecution({
+    const input: Parameters<typeof simulateDemoExecution>[0] = {
       symbol: request.symbol,
       baseAsset: request.market.baseAsset,
       quoteAsset: request.market.quoteAsset,
       side: request.side,
       quoteAmount: request.amountQuote,
       baseQuantity: request.baseQuantity ?? null,
-      evidence: request.evidence,
+      evidence:
+        request.evidence === null || request.evidence === undefined
+          ? buildDemoMarketEvidence(request.symbol, this.scenario, Date.now())
+          : request.evidence,
       market: request.market,
       portfolio: getDemoPortfolio(),
-    });
+    };
+    const result = simulateDemoExecution(input);
+    // Commit the simulated fill to the in-memory ledger so the shared
+    // /api/demo/portfolio read reflects the trade (on single-instance this
+    // is the same store the panel reads; the client also prefers the exec
+    // snapshot, making the panel robust across instances).
+    if (result.ok && result.status === "FILLED" && result.portfolio) {
+      mutatePortfolio(() => result.portfolio!);
+    }
+    return result;
   }
 
   /** Deterministic scenario market for a symbol (used by tests). */
