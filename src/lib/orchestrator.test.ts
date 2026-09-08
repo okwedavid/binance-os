@@ -120,6 +120,29 @@ describe("handleExecute", () => {
     }
   });
 
+  it("executes a demo trade as a simulation even with no Agent OS authorization", async () => {
+    // Regression: demo execution must never require Binance Agent OS
+    // authorization. It completes via the demo adapter with a simulated
+    // result and no authorization-style error, as if no Agent OS session
+    // existed on the server.
+    const out = await handleExecute({
+      mode: "demo",
+      scenario: "healthy",
+      symbol: "BTCUSDT",
+      side: "buy",
+      amount: 20,
+      quote: "USDT",
+      requestText: "Buy $20 of BTCUSDT.",
+      approve: true,
+    });
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.result.simulated).toBe(true);
+      const detail = JSON.stringify(out);
+      expect(detail).not.toMatch(/authoris|authoriz/i);
+    }
+  });
+
   it("re-checks the safety engine server-side and BLOCKs a blocked scenario regardless of approval", async () => {
     const out = await handleExecute({
       mode: "demo",
